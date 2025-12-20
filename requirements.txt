@@ -1,0 +1,9 @@
+python==3.9.6
+numpy==1.25.0
+pandas==1.4.4
+torch==2.0.0
+scikit-learn
+rdkit-pypi
+mordred
+
+# Note: RDKit is best installed via conda (conda-forge). rdkit-pypi is available but may differ.

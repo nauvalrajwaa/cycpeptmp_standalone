@@ -9,3 +9,7 @@
 /sdf
 
 memo.py
+
+model/input/
+
+scripts/*.csv

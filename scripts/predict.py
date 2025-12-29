@@ -125,6 +125,7 @@ def main():
     parser = argparse.ArgumentParser(description="Predict permeability for cyclic peptides.")
     parser.add_argument('-i', '--input', type=str, help="Single amino acid sequence (e.g., 'ACDEF').")
     parser.add_argument('-f', '--file', type=str, help="File containing sequences (one per line).")
+    parser.add_argument('--outdir', type=str, default='runs', help="Base output directory for runs (default: 'runs').")
     args = parser.parse_args()
 
     sequences = []
@@ -149,8 +150,8 @@ def main():
     print(f"Run ID: {run_id}")
 
     # Use a single run folder to keep outputs organized per run:
-    # runs/{run_id}/data, runs/{run_id}/sdf, runs/{run_id}/desc, runs/{run_id}/model_input, runs/{run_id}/predicted
-    base_run = f'runs/{run_id}'
+    # <outdir>/{run_id}/data, <outdir>/{run_id}/sdf, <outdir>/{run_id}/desc, <outdir>/{run_id}/model_input, <outdir>/{run_id}/predicted
+    base_run = f"{args.outdir}/{run_id}"
     dir_data = f'{base_run}/data'
     dir_sdf = f'{base_run}/sdf'
     dir_desc = f'{base_run}/desc'
@@ -304,6 +305,20 @@ def main():
     output_file = f'{dir_predicted}/{set_name}_prediction.csv'
     final_output.to_csv(output_file, index=False)
     print(f"\nResult saved to: {output_file}")
+
+    # Post-process (normalize/classify/rank) the produced CSV into a sorted file.
+    try:
+        import subprocess, sys
+        proc_script = os.path.join('scripts', 'process_predictions.py')
+        if os.path.exists(proc_script):
+            subprocess.run([sys.executable, proc_script, output_file], check=False)
+            sorted_path = os.path.splitext(output_file)[0] + '_sorted.csv'
+            if os.path.exists(sorted_path):
+                print(f'Sorted/classified results saved to: {sorted_path}')
+        else:
+            print('Post-processing script not found; skipping sorted output generation.')
+    except Exception as e:
+        print(f'Post-processing failed: {e}')
 
 if __name__ == "__main__":
     main()

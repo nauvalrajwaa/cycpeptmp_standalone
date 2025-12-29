@@ -19,31 +19,66 @@ python scripts/predict.py \
 python scripts/predict.py --checkpoint weight/Fusion/Fusion-60_cv0.cpt --input-folder model/input --replica 60 --set Test --model-type Fusion --output preds.csv
 ```
 
-Flags of interest
-- `--csv-input`: CSV with `ID` and `Sequence` (or use `--id-col`/`--seq-col`).
-- `--one-letter`: treat sequence as contiguous one-letter codes (e.g. MEGVN).
-- `--run-preprocessing`: run descriptor merge + `.npz` generation before predicting.
-- `--auto-fix-descriptors`: attempt to fix/fill invalid SMILES in `desc/new_data`.
-- `--unique-run`: create a timestamped subfolder under `--input-folder` to avoid overwriting previous runs.
-- `--run-id <name>`: explicit subfolder name under `--input-folder` for this run.
+# Predict pipeline and evobind filter
 
-Notes
-- RDKit/Mordred and other descriptor tools are required for `--run-preprocessing`.
-- When using `--run-preprocessing`, generated `.npz` are written under `<input-folder>/<run-id>` (or timestamped folder with `--unique-run`).
-- If predictions are `nan`, check generated `.npz` under the run folder for NaNs (feature maps or descriptor gaps).
+## Summary of recent changes
 
-```
-Predict script
+- `scripts/predict.py` updates:
+  - Outputs organized under a per-run folder (default base `runs/`); use `--outdir` to change the base.
+  - `--run-preprocessing` will write preprocessing outputs under `runs/<run_id>/...` (or a timestamped folder when using `--unique-run`).
+  - If `moebatch` is not found, MOE descriptors are skipped and missing descriptor columns are filled from `config` means/stds so the pipeline runs without MOE.
+  - After predicting, the script calls `scripts/process_predictions.py` to produce a normalized, classified, and sorted CSV (`*_sorted.csv`).
 
-Usage
+- `scripts/filter_evobind.py` (previously `filter_plddt.py`):
+  - Filters `from_evobind/designmetrics.csv` (or any CSV with `plddt` and `sequence`) by pLDDT and optional `loss` threshold.
+  - Supports comparison operators (`gte`, `gt`, `lte`, `lt`) for both `plddt` and `loss`.
+  - Removes duplicate sequences (preserves first occurrence) and writes a plain text file with one sequence per line (ready to pass to `scripts/predict.py --file`).
 
-1. Prepare input files as in `model/input/...` (see `Newdata.ipynb` for generation).
-2. Run prediction with a checkpoint:
+## Quick usage
+
+- End-to-end predict (run preprocessing + predict):
 
 ```bash
-python scripts/predict.py --checkpoint weight/Fusion/Fusion-60_cv0.cpt --input-folder model/input --replica 60 --set Test --model-type Fusion --output preds.csv
+python scripts/predict.py \
+  --csv-input your_input.csv --one-letter \
+  --run-preprocessing --unique-run --outdir runs \
+  --checkpoint weight/Fusion/Fusion-60_cv0.cpt --replica 60 --model-type Fusion \
+  --device cpu --output predicted/new_prediction.csv
 ```
 
-Notes
-- RDKit is recommended to install via conda-forge.
-- The script expects preprocessed `.npz` input files under the input folder.
+Outputs will be under `runs/<run_id>/predicted/`; a sorted file `new_prediction_sorted.csv` is created automatically.
+
+- Quick predict using an existing preprocessed run folder:
+
+```bash
+python scripts/predict.py \
+  --checkpoint weight/Fusion/Fusion-60_cv0.cpt \
+  --input-folder runs/<run_id>/model_input --replica 60 --set Test --model-type Fusion \
+  --outdir runs --output predicted/new_prediction.csv
+```
+
+- Filter `from_evobind/designmetrics.csv` (example):
+
+```bash
+python scripts/filter_evobind.py \
+  --input from_evobind/designmetrics.csv \
+  --threshold 70 --op gte \
+  --loss 0.5 --loss-op lte \
+  --output from_evobind/test_filtered.txt
+```
+
+Then run predictions on the filtered unique sequences:
+
+```bash
+python scripts/predict.py --file from_evobind/test_filtered.txt --outdir runs
+```
+
+## Notes and tips
+
+- RDKit (and Mordred if used) should be installed in the active Python environment when running preprocessing.
+- MOE (`moebatch`) is optional; if present the MOE 3D descriptor step will run. If absent, the pipeline fills missing descriptor columns using `config/CycPeptMP.json` defaults.
+- If you see `nan` predictions, inspect the run's `model_input` `.npz` files under the run folder for missing or NaN features.
+
+## Contact
+
+- If you want the README adjusted or examples for other checkpoints/ensembles, tell me which checkpoint and I can add the exact command.

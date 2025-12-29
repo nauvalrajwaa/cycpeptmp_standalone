@@ -99,51 +99,92 @@ def merge_descriptors(config, desc_folder_path, data_folder_path):
     """
     # 2D
     for mol_type in ['peptide', 'monomer']:
-        df_moe = pd.read_csv(f'{desc_folder_path}/{mol_type}_moe_2D.csv')
-        df = df_moe.iloc[:, :df_moe.columns.to_list().index('apol')].copy()
-        df_moe = df_moe.iloc[:, df_moe.columns.to_list().index('apol'):].select_dtypes('number')
+        moe2_path = f'{desc_folder_path}/{mol_type}_moe_2D.csv'
+        rdkit_path = f'{desc_folder_path}/{mol_type}_rdkit.csv'
+        mordred2_path = f'{desc_folder_path}/{mol_type}_mordred_2D.csv'
 
-        df_rdkit = pd.read_csv(f'{desc_folder_path}/{mol_type}_rdkit.csv').select_dtypes('number')
-        name_dup = []
-        for _ in df_rdkit.columns:
-            if _ in df_moe.columns.to_list():
-                name_dup.append(_)
-        name_dup = dict(zip(name_dup, [_+'_rdkit' for _ in name_dup]))
-        df_rdkit = df_rdkit.rename(columns=name_dup)
+        if os.path.exists(moe2_path):
+            df_moe_full = pd.read_csv(moe2_path)
+            if 'apol' in df_moe_full.columns:
+                df = df_moe_full.iloc[:, :df_moe_full.columns.to_list().index('apol')].copy()
+                df_moe = df_moe_full.iloc[:, df_moe_full.columns.to_list().index('apol'):].select_dtypes('number')
+            else:
+                df = pd.DataFrame()
+                df_moe = df_moe_full.select_dtypes('number')
+        else:
+            print(f"MOE 2D file not found: {moe2_path}. Continuing without MOE 2D descriptors.")
+            df = pd.DataFrame()
+            df_moe = pd.DataFrame()
 
-        df_mordred = pd.read_csv(f'{desc_folder_path}/{mol_type}_mordred_2D.csv').select_dtypes('number')
-        name_dup = []
-        for _ in df_mordred.columns:
-            if ((_ in df_moe.columns.to_list()) or (_ in df_rdkit.columns.to_list())):
-                name_dup.append(_)
-        name_dup = dict(zip(name_dup, [_+'_mordred' for _ in name_dup]))
-        df_mordred = df_mordred.rename(columns=name_dup)
+        # Ensure we have a basic metadata frame with SMILES/ID when MOE left-hand part is missing
+        if df.empty:
+            if mol_type == 'peptide':
+                enum_path = f'{data_folder_path}/enum_smiles.csv'
+                if os.path.exists(enum_path):
+                    df = pd.read_csv(enum_path, low_memory=False)
+                else:
+                    df = pd.DataFrame({'ID': [] , 'SMILES': []})
+            elif mol_type == 'monomer':
+                mono_path = f'{data_folder_path}/unique_monomer.csv'
+                if os.path.exists(mono_path):
+                    df = pd.read_csv(mono_path, low_memory=False)
+                else:
+                    df = pd.DataFrame({'ID': [], 'SMILES': []})
 
-        df = pd.concat([df, df_moe, df_rdkit, df_mordred], axis=1)
-        df.to_csv(f'{desc_folder_path}/{mol_type}_2D.csv', index=False)
+        if os.path.exists(rdkit_path):
+            df_rdkit = pd.read_csv(rdkit_path).select_dtypes('number')
+            dup = [c for c in df_rdkit.columns if c in df_moe.columns.to_list()]
+            name_dup = dict(zip(dup, [c + '_rdkit' for c in dup]))
+            df_rdkit = df_rdkit.rename(columns=name_dup)
+        else:
+            df_rdkit = pd.DataFrame()
+
+        if os.path.exists(mordred2_path):
+            df_mordred = pd.read_csv(mordred2_path).select_dtypes('number')
+            dup = [c for c in df_mordred.columns if (c in df_moe.columns.to_list()) or (c in df_rdkit.columns.to_list())]
+            name_dup = dict(zip(dup, [c + '_mordred' for c in dup]))
+            df_mordred = df_mordred.rename(columns=name_dup)
+        else:
+            df_mordred = pd.DataFrame()
+
+        df_out = pd.concat([df, df_moe, df_rdkit, df_mordred], axis=1)
+        df_out.to_csv(f'{desc_folder_path}/{mol_type}_2D.csv', index=False)
 
     # 3D
     for mol_type in ['peptide', 'monomer']:
-        df_moe = pd.read_csv(f'{desc_folder_path}/{mol_type}_moe_3D.csv')
-        df_mordred = pd.read_csv(f'{desc_folder_path}/{mol_type}_mordred_3D.csv')
+        moe3_path = f'{desc_folder_path}/{mol_type}_moe_3D.csv'
+        mordred3_path = f'{desc_folder_path}/{mol_type}_mordred_3D.csv'
 
-        df = df_moe.iloc[:, :df_moe.columns.to_list().index('ASA')].copy()
-        df_moe = df_moe.iloc[:, df_moe.columns.to_list().index('ASA'):].select_dtypes('number')
+        if os.path.exists(moe3_path):
+            df_moe_full = pd.read_csv(moe3_path)
+            if 'ASA' in df_moe_full.columns:
+                df = df_moe_full.iloc[:, :df_moe_full.columns.to_list().index('ASA')].copy()
+                df_moe = df_moe_full.iloc[:, df_moe_full.columns.to_list().index('ASA'):].select_dtypes('number')
+            else:
+                df = pd.DataFrame()
+                df_moe = df_moe_full.select_dtypes('number')
+        else:
+            print(f"MOE 3D file not found: {moe3_path}. Continuing without MOE 3D descriptors.")
+            df = pd.DataFrame()
+            df_moe = pd.DataFrame()
 
-        name_dup = []
-        for _ in df_mordred.columns:
-            if _ in df_moe.columns.to_list():
-                name_dup.append(_)
-        name_dup = dict(zip(name_dup, [_+'_mordred' for _ in name_dup]))
-        df_mordred = df_mordred.rename(columns=name_dup).select_dtypes('number')
+        if os.path.exists(mordred3_path):
+            df_mordred = pd.read_csv(mordred3_path)
+            # if there are overlapping names, suffix them
+            dup = [c for c in df_mordred.columns if c in df_moe.columns.to_list()]
+            name_dup = dict(zip(dup, [c + '_mordred' for c in dup]))
+            df_mordred = df_mordred.rename(columns=name_dup).select_dtypes('number')
+        else:
+            df_mordred = pd.DataFrame()
 
         if mol_type == 'peptide':
             df_enu = pd.read_csv(f'{data_folder_path}/enum_smiles.csv', low_memory=False)
-            df = pd.concat([df_enu, df, df_moe, df_mordred], axis=1)
+            df_out = pd.concat([df_enu, df, df_moe, df_mordred], axis=1)
         elif mol_type == 'monomer':
             df_monomer = pd.read_csv(f'{data_folder_path}/unique_monomer.csv', low_memory=False)
-            df_monomer = df_monomer.iloc[df_monomer.index.repeat(config['augmentation']['replica_num'])].reset_index(drop=True)
-            df = pd.concat([df_monomer, df, df_moe, df_mordred], axis=1)
+            if 'augmentation' in config and 'replica_num' in config['augmentation']:
+                df_monomer = df_monomer.iloc[df_monomer.index.repeat(config['augmentation']['replica_num'])].reset_index(drop=True)
+            df_out = pd.concat([df_monomer, df, df_moe, df_mordred], axis=1)
 
-        df.to_csv(f'{desc_folder_path}/{mol_type}_3D.csv', index=False)
+        df_out.to_csv(f'{desc_folder_path}/{mol_type}_3D.csv', index=False)
 

@@ -96,7 +96,7 @@ def generate_monomer_input(config, df, df_mono_2D, df_mono_3D, folder_path, set_
     MONO_PAD_VAL = config['data']['mono_pad_val']
     REPLICA_NUM = config['augmentation']['replica_num']
 
-    os.makedirs(f"{folder_path}/CNN/{REPLICA_NUM}/", exist_ok=True)
+    os.makedirs(f"{folder_path}/CNN/{REPLICA_NUM}/", exist_ok=False)
 
     y = df['permeability'].to_numpy()
     y = np.clip(y, config['data']['lower_limit'], config['data']['upper_limit']).repeat(REPLICA_NUM)
@@ -107,55 +107,32 @@ def generate_monomer_input(config, df, df_mono_2D, df_mono_3D, folder_path, set_
     # NOTE: The number of generated replicas is  mono_len * (mono_max_len - mono_len + 1)
     aug_sequence_number, aug_sequence_length, aug_peptide_ID = perform_augmentation(sequence_number, MONO_PAD_ID, MONO_MAX_LEN)
 
-    # Fallback: if augmentation produced no entries (empty peptides), create REPLICA_NUM copies
-    # of the centered sequence for each peptide so downstream sampling has data.
-    if len(aug_sequence_number) == 0:
-        aug_sequence_number = []
-        aug_peptide_ID = []
-        for idx in range(len(sequence_number)):
-            seq_row = sequence_number[idx].tolist() if hasattr(sequence_number[idx], 'tolist') else list(sequence_number[idx])
-            for _ in range(REPLICA_NUM):
-                aug_sequence_number.append(seq_row)
-                aug_peptide_ID.append(idx+1)
-
     # Monomer descriptor types
     use_descriptors = config['descriptor']['desc_2D'] + config['descriptor']['desc_3D']
 
-    # Align df_mono_2D rows with df_mono_3D by SMILES to avoid length mismatches
-    # Build a map of canonicalized SMILES -> row from df_mono_2D
-    SMILES_to_row = {}
-    for i, smi in enumerate(df_mono_2D['SMILES'].astype(str).tolist()):
-        key = utils_function.canonicalize_smiles(smi)
-        SMILES_to_row[key] = df_mono_2D.iloc[i]
+    # Build combined monomer dataframe (2D repeated to match 3D conformers)
+    df_mono = pd.concat([df_mono_2D.iloc[sum([[_]*REPLICA_NUM for _ in range(len(df_mono_2D))], [])].reset_index(drop=True), df_mono_3D], axis=1)
 
-    rows2d = []
-    for smi in df_mono_3D['SMILES'].astype(str).tolist():
-        key = utils_function.canonicalize_smiles(smi)
-        if key in SMILES_to_row:
-            rows2d.append(SMILES_to_row[key])
-        else:
-            # fallback: append NaN row with same columns
-            rows2d.append(pd.Series([np.nan]*len(df_mono_2D.columns), index=df_mono_2D.columns))
-
-    df_mono_2D_repeated = pd.DataFrame(rows2d).reset_index(drop=True)
-    df_mono_3D_reset = df_mono_3D.reset_index(drop=True)
-    df_mono = pd.concat([df_mono_2D_repeated, df_mono_3D_reset], axis=1)
+    # Ensure all descriptors listed in config exist in the dataframe.
+    mono_desc_mean = config['descriptor']['mono_desc_mean']
+    mono_desc_std = config['descriptor']['mono_desc_std']
+    for desc in use_descriptors:
+        if desc not in df_mono.columns:
+            if desc in mono_desc_mean:
+                df_mono[desc] = mono_desc_mean[desc]
+            else:
+                df_mono[desc] = 0.0
 
     # Standardize monomer descriptors by Z-score
     desc_preprocessing = df_mono[use_descriptors].copy()
-    mono_desc_mean = config['descriptor']['mono_desc_mean']
-    mono_desc_std = config['descriptor']['mono_desc_std']
     for desc in desc_preprocessing:
-        desc_preprocessing[desc] = (desc_preprocessing[desc] - mono_desc_mean[desc]) / mono_desc_std[desc]
+        mean_val = mono_desc_mean.get(desc, 0.0)
+        std_val = mono_desc_std.get(desc, 1.0)
+        desc_preprocessing[desc] = (desc_preprocessing[desc] - mean_val) / std_val
 
-    # Assign replica_index robustly based on total length
-    total_rows = len(desc_preprocessing)
-    if REPLICA_NUM > 0:
-        group_count = total_rows // REPLICA_NUM
-        desc_preprocessing['replica_index'] = list(np.tile(np.arange(REPLICA_NUM), group_count))[:total_rows]
-    else:
-        desc_preprocessing['replica_index'] = [0] * total_rows
-    desc_preprocessing.index = df_mono_3D_reset['ID']
+    # Assign each conformer of the monomer index from 0 to replica_num-1.
+    desc_preprocessing['replica_index'] = sum([[_ for _ in range(REPLICA_NUM)]*len(df_mono_2D)], [])
+    desc_preprocessing.index = df_mono_3D['ID']
 
 
     # Select replica_num replicas for each peptide
@@ -198,14 +175,7 @@ def generate_monomer_input(config, df, df_mono_2D, df_mono_3D, folder_path, set_
         for j in range(REPLICA_NUM):
             feature_map_now.append(feature_map[j][i])
     feature_map_now = np.array(feature_map_now)
-    # Replace any NaNs that originate from missing monomer descriptors with
-    # the padding value so downstream feature_map contains no NaNs.
-    try:
-        feature_map_now = np.nan_to_num(feature_map_now, nan=MONO_PAD_VAL)
-    except Exception:
-        # Fallback: ensure dtype is float and then replace
-        feature_map_now = feature_map_now.astype(float)
-        feature_map_now = np.nan_to_num(feature_map_now, nan=MONO_PAD_VAL)
+
     np.savez_compressed(f'{folder_path}/CNN/{REPLICA_NUM}/feature_map_{REPLICA_NUM}_{set_name}.npz',
                         id=np.array(aug_peptide_ID_now),
                         table=np.array(aug_sequence_number_now),

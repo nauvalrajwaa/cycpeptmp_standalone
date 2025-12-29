@@ -1,363 +1,309 @@
-#!/usr/bin/env python3
-"""Predict CLI for CycPeptMP
-
-Usage example:
-  python scripts/predict.py \
-    --checkpoint weight/Fusion/Fusion-60_cv0.cpt \
-    --input-folder model/input \
-    --replica 60 --set Test --model-type Fusion \
-    --output predictions.csv
-"""
+import json
 import os
-import sys
-import json
-import argparse
-import json
 import pandas as pd
+import numpy as np
+import argparse
+from rdkit import Chem
+import torch
+import torch.nn as nn
+import sys
+import warnings
+import datetime
+import shutil
 
-# Ensure repo root is on path
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if ROOT not in sys.path:
-    sys.path.insert(0, ROOT)
+# Suppress warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
 
-# utils imports (import lazily where needed to avoid hard dependency at runtime)
+# ------------------------------------------------------------------------------
+# 1. SETUP & IMPORTS
+# ------------------------------------------------------------------------------
+sys.path.append(os.getcwd())
 
+try:
+    from utils import utils_function
+    from utils import calculate_descriptors
+    from utils import generate_conformation
+    from utils import generate_atom_input
+    from utils import generate_monomer_input
+    from utils import generate_peptide_input
+    from model import model_utils
+except ImportError as e:
+    print("Error: Could not import required modules.")
+    print("Make sure you are in the folder containing 'utils/' and 'model/' directories.")
+    print(f"Details: {e}")
+    sys.exit(1)
 
-def load_checkpoint(model, path, device):
-    # import torch locally to avoid relying on a global `torch` name
-    import torch
-    import torch.nn as nn
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    ckpt = torch.load(path, map_location=device)
-    # saved state dict was from DataParallel (model.module.state_dict())
-    try:
-        model = nn.DataParallel(model)
-        model.module.load_state_dict(ckpt['model_state_dict'])
-    except Exception:
-        # fallback: try loading directly into model
-        model.load_state_dict(ckpt['model_state_dict'])
-    return model
+# ------------------------------------------------------------------------------
+# 2. DEFINITIONS & MAPPING
+# ------------------------------------------------------------------------------
+AA_TO_SMILES = {
+    'A': 'CN[C@@H](C)C=O',                  # Alanine
+    'C': 'CN[C@H](C=O)CS',                  # Cysteine
+    'D': 'CN[C@H](C=O)CC(=O)O',             # Aspartic Acid
+    'E': 'CN[C@H](C=O)CCC(=O)O',            # Glutamic Acid
+    'F': 'CN[C@H](C=O)Cc1ccccc1',           # Phenylalanine
+    'G': 'CNCC=O',                          # Glycine
+    'H': 'CN[C@H](C=O)Cc1c[nH]cn1',         # Histidine
+    'I': 'CC[C@H](C)[C@@H](C=O)NC',         # Isoleucine
+    'K': 'CN[C@H](C=O)CCCCN',               # Lysine
+    'L': 'CN[C@H](C=O)CC(C)C',              # Leucine
+    'M': 'CN[C@H](C=O)CCSC',                # Methionine
+    'N': 'CN[C@H](C=O)CC(N)=O',             # Asparagine
+    'P': 'CN1CCC[C@H]1C=O',                 # Proline
+    'Q': 'CN[C@H](C=O)CCC(N)=O',            # Glutamine
+    'R': 'CN[C@H](C=O)CCCNC(=N)N',          # Arginine
+    'S': 'CN[C@H](C=O)CO',                  # Serine
+    'T': 'CN[C@H](C=O)[C@@H](C)OC',         # Threonine (O-methylated)
+    'V': 'CN[C@H](C=O)C(C)C',               # Valine
+    'W': 'CN[C@H](C=O)Cc1c[nH]c2ccccc12',   # Tryptophan
+    'Y': 'CN[C@H](C=O)Cc1ccc(O)cc1'         # Tyrosine
+}
 
+def sequence_to_data(sequences):
+    """Converts a list of 1-letter sequences into the DataFrame format."""
+    data_rows = []
+    
+    for idx, seq in enumerate(sequences):
+        seq = seq.upper().strip()
+        monomers = []
+        valid_seq = True
+        
+        for aa in seq:
+            if aa in AA_TO_SMILES:
+                monomers.append(AA_TO_SMILES[aa])
+            else:
+                print(f"Warning: Unknown amino acid '{aa}' in sequence {seq}. Skipping.")
+                valid_seq = False
+                break
+        
+        if not valid_seq:
+            continue
+            
+        row = {
+            'ID': f'pept{idx+1}',
+            'ID_org': f'seq_{idx+1}_{seq}',
+            'SMILES': '.'.join(monomers),
+            'Monomer_number': len(monomers),
+            'Monomer_number_in_main_chain': len(monomers),
+            'shape': 'Unknown',
+            'permeability': 0
+        }
+        
+        for i, m in enumerate(monomers):
+            row[f'Substructure-{i+1}'] = m
+            
+        data_rows.append(row)
+        
+    return pd.DataFrame(data_rows)
 
+def sanitize_config(cfg):
+    """Recursively disable MOE descriptors in the config dictionary."""
+    if isinstance(cfg, dict):
+        keys = list(cfg.keys())
+        for k in keys:
+            v = cfg[k]
+            if 'moe' in k.lower() and v is True:
+                cfg[k] = False
+            
+            if isinstance(v, list):
+                new_list = [x for x in v if 'moe' not in str(x).lower()]
+                cfg[k] = new_list
+            
+            elif isinstance(v, (dict, list)):
+                sanitize_config(v)
+    elif isinstance(cfg, list):
+        for item in cfg:
+            sanitize_config(item)
+
+# ------------------------------------------------------------------------------
+# 3. MAIN PIPELINE
+# ------------------------------------------------------------------------------
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--checkpoint', required=False, default=None, help='Path to model checkpoint (required for prediction unless --preprocess-only or --convert-only is used)')
-    parser.add_argument('--input-folder', default='model/input')
-    parser.add_argument('--run-id', default=None, help='Subfolder under --input-folder to store generated .npz (avoids overwriting).')
-    parser.add_argument('--unique-run', action='store_true', help='Create a timestamped unique subfolder under --input-folder for this run')
-    parser.add_argument('--replica', type=int, default=60)
-    parser.add_argument('--set', dest='set_name', default='Test')
-    parser.add_argument('--model-type', default='Fusion', choices=['Fusion','Trans','CNN','MLP'])
-    parser.add_argument('--device', default='cuda')
-    parser.add_argument('--output', default='predictions.csv')
-    # Conversion options
-    parser.add_argument('--csv-input', default=None, help='CSV file with ID and sequence tokens (monomer symbols).')
-    parser.add_argument('--seq-delim', default=None, help='Delimiter for sequence tokens (default: whitespace).')
-    parser.add_argument('--id-col', default='ID', help='Column name for sample ID in input CSV.')
-    parser.add_argument('--seq-col', default='Sequence', help='Column name for sequence in input CSV.')
-    parser.add_argument('--one-letter', action='store_true', help='Treat sequences as contiguous one-letter codes (e.g. MEGVN => M E G V N). Overrides --seq-delim.')
-    parser.add_argument('--check-env', action='store_true', help='Print Python, rdkit, numpy, and torch versions then exit.')
-    parser.add_argument('--convert-only', action='store_true', help='Only perform conversion, skip prediction.')
-    parser.add_argument('--run-preprocessing', action='store_true', help='Run descriptor merge and generate input .npz files after conversion (requires RDKit/Mordred).')
-    parser.add_argument('--preprocess-only', action='store_true', help='Run preprocessing (descriptor merge + .npz generation) then exit; does not require --checkpoint.')
-    parser.add_argument('--auto-fix-descriptors', action='store_true', help='Try to auto-fill or drop invalid SMILES in desc/new_data after descriptor merge.')
+    parser = argparse.ArgumentParser(description="Predict permeability for cyclic peptides.")
+    parser.add_argument('-i', '--input', type=str, help="Single amino acid sequence (e.g., 'ACDEF').")
+    parser.add_argument('-f', '--file', type=str, help="File containing sequences (one per line).")
     args = parser.parse_args()
 
-    # Environment check: print versions and exit
-    if getattr(args, 'check_env', False):
-        import platform
-        print('Python executable:', sys.executable)
-        print('Python version:', platform.python_version())
-        try:
-            import rdkit
-            print('rdkit:', rdkit.__version__)
-        except Exception:
-            print('rdkit: not installed')
-        try:
-            import numpy as _npv
-            print('numpy:', _npv.__version__)
-        except Exception:
-            print('numpy: not installed')
-        try:
-            import torch as _tv
-            print('torch:', _tv.__version__)
-        except Exception:
-            print('torch: not installed')
+    sequences = []
+    if args.input:
+        sequences.append(args.input)
+    elif args.file:
+        with open(args.file, 'r') as f:
+            sequences = [line.strip() for line in f if line.strip()]
+    else:
+        print("No input provided. Using example: 'AYMV'")
+        sequences = ["AYMV"]
+
+    print(f"Processing {len(sequences)} sequence(s)...")
+
+    new_data = sequence_to_data(sequences)
+    if new_data.empty:
+        print("No valid data generated.")
         return
 
-    # If requested, create a run-specific subfolder under the input folder so
-    # generated .npz files do not overwrite previous runs. This will adjust
-    # `args.input_folder` for the rest of the script.
-    if getattr(args, 'unique_run', False) or getattr(args, 'run_id', None):
-        run_id = None
-        if getattr(args, 'unique_run', False) and not getattr(args, 'run_id', None):
-            from datetime import datetime
-            run_id = datetime.now().strftime('%Y%m%dT%H%M%S')
-        else:
-            run_id = args.run_id
-        if run_id:
-            args.input_folder = os.path.join(args.input_folder, str(run_id))
-            os.makedirs(args.input_folder, exist_ok=True)
-            print('Using run-specific input folder:', args.input_folder)
+    # --- UNIQUE RUN FOLDER ---
+    run_id = datetime.datetime.now().strftime("run_%Y%m%d_%H%M%S")
+    print(f"Run ID: {run_id}")
 
-    # Load config directly so conversion can run without torch installed
-    config = json.load(open('config/CycPeptMP.json', 'r'))
-    best_trial = config['model']
+    # Use a single run folder to keep outputs organized per run:
+    # runs/{run_id}/data, runs/{run_id}/sdf, runs/{run_id}/desc, runs/{run_id}/model_input, runs/{run_id}/predicted
+    base_run = f'runs/{run_id}'
+    dir_data = f'{base_run}/data'
+    dir_sdf = f'{base_run}/sdf'
+    dir_desc = f'{base_run}/desc'
+    dir_model_input = f'{base_run}/model_input'
+    dir_predicted = f'{base_run}/predicted'
 
-    # If user provided a CSV, convert to model/input format (data/new_data) first
-    if args.csv_input is not None:
-        # Build new_data dataframe compatible with repo structure
-        df_in = pd.read_csv(args.csv_input)
-        seq_delim = args.seq_delim
-        mono_ref = pd.read_csv('data/unique_monomer.csv', low_memory=False)
-        symbol_to_smiles = dict(zip(mono_ref['Symbol'].astype(str), mono_ref['SMILES'].astype(str)))
+    paths = [dir_data, dir_sdf, dir_desc, dir_model_input, dir_predicted]
+    for p in paths:
+        os.makedirs(p, exist_ok=True)
 
-        rows = []
-        used_monos_set = set()
-        for _, r in df_in.iterrows():
-            sid = r.get(args.id_col)
-            seq = r.get(args.seq_col)
-            if pd.isna(seq):
-                tokens = []
-            else:
-                if args.one_letter:
-                    s = str(seq).replace(' ', '').strip().upper()
-                    tokens = list(s) if s else []
-                else:
-                    if seq_delim:
-                        tokens = str(seq).split(seq_delim)
-                    else:
-                        tokens = str(seq).split()
+    input_csv_path = f'{dir_data}/new_data.csv'
+    new_data.to_csv(input_csv_path, index=False)
+    
+    config_path = 'config/CycPeptMP.json'
+    if not os.path.exists(config_path):
+        print(f"Error: Config file not found at {config_path}")
+        return
+    config = json.load(open(config_path, 'r'))
 
-            subs = [symbol_to_smiles.get(t, '') for t in tokens]
-            used_monos_set.update([s for s in subs if s])
-            # Prepare a row similar to data/new_data/new_data.csv
-            max_sub = 15
-            subdict = {f'Substructure-{i+1}': (subs[i] if i < len(subs) else '') for i in range(max_sub)}
-            combined_smiles = '.'.join([s for s in subs if s])
-            rows.append({
-                'ID': sid,
-                'ID_org': sid,
-                'SMILES': combined_smiles,
-                'Monomer_number': len(tokens),
-                'Monomer_number_in_main_chain': len(tokens),
-                'shape': 'Unknown',
-                'permeability': 0,
-                **subdict
-            })
+    print("Adjusting config to ignore MOE descriptors...")
+    sanitize_config(config)
 
-        df_new = pd.DataFrame(rows)
-        os.makedirs('data/new_data', exist_ok=True)
-        df_new.to_csv('data/new_data/new_data.csv', index=False)
-        # Build unique_monomer.csv in data/new_data by filtering global list
-        df_mono_used = mono_ref[mono_ref['SMILES'].isin(list(used_monos_set))]
-        df_mono_used.to_csv('data/new_data/unique_monomer.csv', index=False)
+    print(f"--- Starting Pipeline (Output folder: {run_id}) ---")
 
-        # Try to enumerate SMILES (creates data/new_data/enum_smiles.csv) if RDKit is available
-        try:
-            from utils import utils_function
-            utils_function.enumerate_smiles(df_new[['ID','SMILES']].rename(columns={'ID':'ID','SMILES':'SMILES'}), config, 'data/new_data/enum_smiles.csv')
-            print('Wrote data/new_data/new_data.csv and data/new_data/enum_smiles.csv')
-        except Exception as e:
-            print('Wrote data/new_data/new_data.csv. Skipped enumerate_smiles (RDKit or utils_function import failed):', e)
-
-        if args.run_preprocessing:
+    # --- Step 1: Data Preparation ---
+    print("Generating unique monomers...")
+    utils_function.get_unique_monomer(new_data, f'{dir_data}/unique_monomer.csv')
+    
+    print("Enumerating SMILES...")
+    utils_function.enumerate_smiles(new_data, config, f'{dir_data}/enum_smiles.csv')
+    df_enu = pd.read_csv(f'{dir_data}/enum_smiles.csv')
+    
+    print("Generating peptide conformations...")
+    generate_conformation.generate_peptide_conformation(config, df_enu, f'{dir_sdf}/peptide.sdf')
+    
+    print("Generating monomer conformations...")
+    df_monomer = pd.read_csv(f'{dir_data}/unique_monomer.csv')
+    generate_conformation.generate_monomer_conformation(config, df_monomer, f'{dir_sdf}/monomer.sdf')
+    
+    # --- Step 2: Descriptors ---
+    print("Calculating descriptors...")
+    calculate_descriptors.calc_rdkit_descriptors(new_data['SMILES'].tolist(), f'{dir_desc}/peptide_rdkit.csv')
+    calculate_descriptors.calc_rdkit_descriptors(df_monomer['SMILES'].tolist(), f'{dir_desc}/monomer_rdkit.csv')
+    
+    calculate_descriptors.calc_mordred_2Ddescriptors(new_data['SMILES'].tolist(), f'{dir_desc}/peptide_mordred_2D.csv')
+    calculate_descriptors.calc_mordred_2Ddescriptors(df_monomer['SMILES'].tolist(), f'{dir_desc}/monomer_mordred_2D.csv')
+    
+    mols_pep = Chem.SDMolSupplier(f'{dir_sdf}/peptide.sdf')
+    calculate_descriptors.calc_mordred_3Ddescriptors(mols_pep, f'{dir_desc}/peptide_mordred_3D.csv')
+    
+    mols_mono = Chem.SDMolSupplier(f'{dir_sdf}/monomer.sdf')
+    calculate_descriptors.calc_mordred_3Ddescriptors(mols_mono, f'{dir_desc}/monomer_mordred_3D.csv')
+    
+    # Attempt to generate MOE descriptors if MOE (moebatch) is available.
+    moebatch_path = shutil.which('moebatch')
+    if moebatch_path:
+        print("Found 'moebatch' in PATH; attempting to run MOE descriptor script...")
+        script = os.path.join('utils', 'MOE_3D_descriptors.sh')
+        if os.path.exists(script):
             try:
-                # Merge descriptors (uses files under desc/new_data)
-                from utils import calculate_descriptors, generate_monomer_input, generate_atom_input, generate_peptide_input
-                calculate_descriptors.merge_descriptors(config, 'desc/new_data', 'data/new_data')
-
-                # Load descriptor files
-                df_mono_2D = pd.read_csv('desc/new_data/monomer_2D.csv', low_memory=False)
-                df_mono_3D = pd.read_csv('desc/new_data/monomer_3D.csv', low_memory=False)
-                df_pep_2D = pd.read_csv('desc/new_data/peptide_2D.csv', low_memory=False)
-                df_pep_3D = pd.read_csv('desc/new_data/peptide_3D.csv', low_memory=False)
-
-                # Quick SMILES validation to catch missing/invalid entries early
-                try:
-                    from rdkit import Chem
-                except Exception:
-                    raise
-
-                bad = []
-                def _check(df, dfname):
-                    if 'SMILES' not in df.columns:
-                        return
-                    for idx, smi in df['SMILES'].items():
-                        if pd.isna(smi) or str(smi).strip() == '':
-                            bad.append((dfname, idx, smi))
-                        else:
-                            try:
-                                if Chem.MolFromSmiles(str(smi)) is None:
-                                    bad.append((dfname, idx, smi))
-                            except Exception:
-                                bad.append((dfname, idx, smi))
-
-                _check(df_mono_2D, 'monomer_2D')
-                _check(df_mono_3D, 'monomer_3D')
-                _check(df_pep_2D, 'peptide_2D')
-                _check(df_pep_3D, 'peptide_3D')
-
-                if bad:
-                    print('Found invalid SMILES entries in descriptor files.')
-                    for dfname, idx, smi in bad:
-                        print(f"  {dfname} row {idx}: {smi}")
-                    if getattr(args, 'auto_fix_descriptors', False):
-                        print('Attempting auto-fix: fill from mapping files then drop remaining rows')
-                        import shutil
-                        # attempt to fill desc/new_data/* from data/new_data/unique_monomer.csv and data/unique_monomer.csv
-                        def _autofix(path):
-                            import pandas as _pd
-                            import os as _os
-                            if not _os.path.exists(path):
-                                return 0,0
-                            dfc = _pd.read_csv(path, low_memory=False)
-                            before = len(dfc)
-                            mask_missing = dfc['SMILES'].isna() | (dfc['SMILES'].astype(str).str.strip().str.lower()=='nan') | (dfc['SMILES'].astype(str).str.strip()=='')
-                            if mask_missing.sum()==0:
-                                return 0,0
-                            maps = []
-                            for mpath in ['data/new_data/unique_monomer.csv','data/unique_monomer.csv']:
-                                if _os.path.exists(mpath):
-                                    mdf = _pd.read_csv(mpath, low_memory=False)
-                                    if 'Symbol' in mdf.columns and 'SMILES' in mdf.columns:
-                                        maps.append(dict(zip(mdf['Symbol'].astype(str), mdf['SMILES'].astype(str))))
-                            filled = 0
-                            for i,row in dfc[mask_missing].iterrows():
-                                sym = str(row.get('Symbol','')).strip()
-                                if not sym:
-                                    continue
-                                for mp in maps:
-                                    if sym in mp and str(mp[sym]).strip()!='':
-                                        dfc.at[i,'SMILES'] = mp[sym]
-                                        filled += 1
-                                        break
-                            mask_missing = dfc['SMILES'].isna() | (dfc['SMILES'].astype(str).str.strip().str.lower()=='nan') | (dfc['SMILES'].astype(str).str.strip()=='')
-                            dropped = int(mask_missing.sum())
-                            if dropped>0:
-                                dfc = dfc[~mask_missing]
-                            # backup and write
-                            shutil.copy(path, path+'.bak')
-                            dfc.to_csv(path, index=False)
-                            return filled, dropped
-
-                        f1,d1 = _autofix('desc/new_data/monomer_3D.csv')
-                        print(f'auto-fixed monomer_3D: filled={f1} dropped={d1}')
-                        # re-load files and re-check
-                        df_mono_3D = pd.read_csv('desc/new_data/monomer_3D.csv', low_memory=False)
-                        bad = []
-                        _check(df_mono_2D, 'monomer_2D')
-                        _check(df_mono_3D, 'monomer_3D')
-                        _check(df_pep_2D, 'peptide_2D')
-                        _check(df_pep_3D, 'peptide_3D')
-                        if bad:
-                            print('Auto-fix incomplete; aborting preprocessing. Remaining invalid SMILES:')
-                            for dfname, idx, smi in bad:
-                                print(f"  {dfname} row {idx}: {smi}")
-                            raise ValueError('Invalid SMILES detected; auto-fix did not resolve all issues')
-                        print('Auto-fix succeeded; continuing preprocessing')
-                    else:
-                        print('Aborting preprocessing. Use --auto-fix-descriptors to attempt automatic fixes.')
-                        raise ValueError('Invalid SMILES detected; fix descriptor inputs before preprocessing')
-
-                # Generate inputs (.npz)
-                generate_monomer_input.generate_monomer_input(config, df_new, df_mono_2D, df_mono_3D, args.input_folder, args.set_name)
-
-                # Prepare mols for atom input from enumerated smiles
-                df_enu = pd.read_csv('data/new_data/enum_smiles.csv')
-                from rdkit import Chem
-                mols = [Chem.AddHs(Chem.MolFromSmiles(smi)) for smi in df_enu['SMILES'].tolist()]
-                generate_atom_input.generate_atom_input(config, df_new, df_enu, mols, args.input_folder, args.set_name)
-
-                generate_peptide_input.generate_peptide_input(config, df_new, df_enu, df_pep_2D, df_pep_3D, args.input_folder, args.set_name)
-
-                print('Preprocessing complete: model input .npz files generated under', args.input_folder)
+                ret = os.system(f"bash {script} {run_id}")
+                if ret != 0:
+                    print(f"MOE script exited with code {ret}. Continuing without MOE descriptors.")
             except Exception as e:
-                import traceback
-                print('Preprocessing failed (missing dependency or runtime error):')
-                traceback.print_exc()
+                print(f"MOE script execution failed: {e}. Continuing without MOE descriptors.")
+        else:
+            print(f"MOE script not found at {script}. Continuing without MOE descriptors.")
+    else:
+        print("Warning: 'moebatch' not found in PATH. Proceeding without MOE descriptors.")
 
-        if args.convert_only:
-            print('Conversion finished (convert-only). Exiting.')
-            return
+    print("Merging descriptors...")
+    calculate_descriptors.merge_descriptors(config, f'{dir_desc}/', f'{dir_data}/')
+    
+    # --- Step 3: Model Inputs ---
+    print("Generating model inputs...")
+    set_name = 'new'
+    
+    generate_atom_input.generate_atom_input(config, new_data, df_enu, mols_pep, dir_model_input, set_name)
+    
+    df_mono_2D = pd.read_csv(f'{dir_desc}/monomer_2D.csv')
+    df_mono_3D = pd.read_csv(f'{dir_desc}/monomer_3D.csv')
+    generate_monomer_input.generate_monomer_input(config, new_data, df_mono_2D, df_mono_3D, dir_model_input, set_name)
+    
+    df_pep_2D = pd.read_csv(f'{dir_desc}/peptide_2D.csv')
+    df_pep_3D = pd.read_csv(f'{dir_desc}/peptide_3D.csv')
+    generate_peptide_input.generate_peptide_input(config, new_data, df_enu, df_pep_2D, df_pep_3D, dir_model_input, set_name)
 
-        if args.preprocess_only:
-            print('Preprocessing finished (preprocess-only). Exiting.')
-            return
+    # --- Step 4: Prediction ---
+    print("Running Prediction...")
+    MODEL_TYPE = 'Fusion'
+    REPLICA_NUM = 60
+    
+    dataset_new = model_utils.load_dataset(dir_model_input, MODEL_TYPE, REPLICA_NUM, set_name)
+    model_utils.set_seed(config['data']['seed'])
+    best_trial = config['model']
+    
+    dfs = []
+    for cv in range(3):
+        model_path = f'weight/{MODEL_TYPE}/{MODEL_TYPE}-{REPLICA_NUM}_cv{cv}.cpt'
+        
+        if not os.path.exists(model_path):
+             print(f"  Warning: Checkpoint not found at {model_path}")
+             continue
 
-    # At this point we need torch and model_utils for prediction — import lazily so conversion-only works without torch
-    try:
-        import torch
-        import torch.nn as nn
-        from torch.utils.data import DataLoader
-        from model import model_utils
-    except Exception as e:
-        print('Failed to import PyTorch/model utilities:', e)
+        try:
+            checkpoint = torch.load(model_path, map_location=DEVICE)
+        except Exception:
+            checkpoint = torch.load(model_path, map_location=DEVICE, weights_only=False)
+
+        model = model_utils.create_model(best_trial, DEVICE, config['model']['use_auxiliary'])
+        model.load_state_dict(checkpoint['model_state_dict'])
+        
+        if torch.cuda.device_count() > 1:
+            model = nn.DataParallel(model)
+        model.to(DEVICE)
+        
+        batch_size = len(dataset_new) if len(dataset_new) > 0 else 1
+        dataloader = torch.utils.data.DataLoader(dataset_new, batch_size=batch_size, shuffle=False)
+        
+        ids, exps, preds = model_utils.predict_valid(
+            DEVICE, model, dataloader, None, istrain=False,
+            use_auxiliary=config['model']['use_auxiliary'],
+            gamma_layer=config['model']['gamma_layer'],
+            gamma_subout=config['model']['gamma_subout']
+        )
+        
+        now_pred = pd.DataFrame(preds, columns=['pred'])
+        now_pred['ID'] = ids
+        now_pred['pred'] = pd.to_numeric(now_pred['pred'], errors='coerce')
+        
+        now_pred = now_pred.groupby('ID').mean().reset_index()
+        dfs.append(now_pred.set_index('ID'))
+    
+    if not dfs:
+        print("Error: No predictions generated.")
         return
 
-    device = torch.device(args.device if torch.cuda.is_available() and 'cuda' in args.device else 'cpu')
+    pred_mean = sum(dfs) / len(dfs)
+    pred_mean = pred_mean.reset_index()
+    
+    pred_mean['ID'] = pred_mean['ID'].astype(int)
+    new_data['join_id'] = new_data['ID'].astype(str).str.extract(r'(\d+)').astype(int)
+    
+    result = pd.merge(pred_mean, new_data, left_on='ID', right_on='join_id')
+    
+    final_output = result[['ID_org', 'pred', 'SMILES']]
+    
+    print("\n=== FINAL PREDICTIONS ===")
+    print(final_output[['ID_org', 'pred']].to_string(index=False))
+    
+    output_file = f'{dir_predicted}/{set_name}_prediction.csv'
+    final_output.to_csv(output_file, index=False)
+    print(f"\nResult saved to: {output_file}")
 
-    # create model
-    use_aux = bool(best_trial.get('use_auxiliary', False))
-
-    # Preflight: inspect generated .npz files for expected shapes
-    try:
-        import numpy as _np
-        max_atom = config['data']['max_atommun']
-        node_npz = f"{args.input_folder}/Trans/{args.replica}/node_{args.replica}_{args.set_name}.npz"
-        conf_npz = f"{args.input_folder}/Trans/{args.replica}/conf_{args.replica}_{args.set_name}.npz"
-        graph_npz = f"{args.input_folder}/Trans/{args.replica}/graph_{args.replica}_{args.set_name}.npz"
-        if not (os.path.exists(node_npz) and os.path.exists(conf_npz) and os.path.exists(graph_npz)):
-            print('Expected model input .npz files missing under', args.input_folder)
-            print('Check that --run-preprocessing or --preprocess-only completed successfully')
-            return
-
-        _node = _np.load(node_npz)
-        _conf = _np.load(conf_npz)
-        _graph = _np.load(graph_npz)
-        print('Input shapes: node.atoms_mask', getattr(_node, 'files', None) and _node['atoms_mask'].shape, 'conf', _conf['conf'].shape, 'graph', _graph['graph'].shape)
-        if _conf['conf'].ndim != 3 or _conf['conf'].shape[1] != max_atom or _conf['conf'].shape[2] != max_atom:
-            print('Unexpected `conf` shape:', _conf['conf'].shape, 'expected (N,', max_atom, max_atom, ')')
-            print('Aborting to avoid runtime error in model. You may need to re-run preprocessing.')
-            return
-    except Exception as e:
-        print('Preflight check failed:', e)
-        return
-    model = model_utils.create_model(best_trial, device, use_aux)
-    model = load_checkpoint(model, args.checkpoint, device)
-    model.to(device)
-    model.eval()
-
-    # prepare dataset and dataloader
-    dataset = model_utils.load_dataset(args.input_folder, args.model_type, args.replica, args.set_name, _10cv=False)
-    batch_size = int(best_trial.get('params_batch_size', 64))
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
-
-    # predict
-    ids, exps, preds = model_utils.predict_valid(device, model, dataloader, criterion=None, istrain=False,
-                                                use_auxiliary=use_aux,
-                                                gamma_layer=best_trial.get('gamma_layer', None),
-                                                gamma_subout=best_trial.get('gamma_subout', None))
-
-    # save CSV
-    import csv
-    with open(args.output, 'w', newline='') as f:
-        writer = csv.writer(f)
-        writer.writerow(['id','exp','pred'])
-        import numpy as _np
-        for i,e,p in zip(ids, exps, preds):
-            # p may be a list/array like [value], handle both cases
-            if isinstance(p, (list, tuple)) or (_np and isinstance(p, _np.ndarray)):
-                try:
-                    val = float(_np.array(p).ravel()[0])
-                except Exception:
-                    val = float(p[0])
-            else:
-                val = float(p)
-            writer.writerow([i, e, val])
-
-    print(f'Wrote predictions to {args.output}')
-
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

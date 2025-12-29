@@ -14,17 +14,11 @@ def get_atoms_mask(mols, MAX_ATOMNUM):
     """
     Get the mask of atoms in the molecule.
     """
-    n_mols = len(mols)
-    mask = np.ones((n_mols, MAX_ATOMNUM), dtype=int)
-    for i, mol in enumerate(tqdm(mols)):
-        if mol is None:
-            num_now = 0
-        else:
-            num_now = mol.GetNumAtoms()
-        num_now = num_now if num_now <= MAX_ATOMNUM else MAX_ATOMNUM
-        if num_now > 0:
-            mask[i, :num_now] = 0
-    return mask
+    atoms_mask = []
+    for mol in tqdm(mols):
+        num_now = mol.GetNumAtoms()
+        atoms_mask.append([0]*num_now + [1]*(MAX_ATOMNUM-num_now))
+    return np.array(atoms_mask)
 
 
 
@@ -52,12 +46,9 @@ def calculate_atoms_features(mols, MAX_ATOMNUM, ATOM_PAD_VAL):
     """""
     atoms_features = []
 
-    ATTRIBUTE_LEN = 30
-    n_mols = len(mols)
-    features = np.full((n_mols, MAX_ATOMNUM, ATTRIBUTE_LEN), ATOM_PAD_VAL, dtype=float)
-    for i, mol in enumerate(tqdm(mols)):
-        atoms = [] if mol is None else list(mol.GetAtoms())
-        for j, atom in enumerate(atoms[:MAX_ATOMNUM]):
+    for mol in tqdm(mols):
+        feature_now = []
+        for atom in mol.GetAtoms():
             attributes = []
             # Symbol: ['C', 'N', 'O', 'F', 'Br', 'S', 'Cl']
             # 8 dims
@@ -100,19 +91,17 @@ def calculate_atoms_features(mols, MAX_ATOMNUM, ATOM_PAD_VAL):
             attributes.append(int(atom.IsInRing()))
             attributes.append(int(atom.GetIsAromatic()))
 
-            # write attributes into the preallocated array
-            try:
-                features[i, j, :] = np.array(attributes, dtype=float)
-            except Exception:
-                # fallback: if shapes mismatch, pad/truncate attributes
-                arr = np.array(attributes, dtype=float)
-                if arr.size >= ATTRIBUTE_LEN:
-                    features[i, j, :] = arr[:ATTRIBUTE_LEN]
-                else:
-                    tmp = np.full((ATTRIBUTE_LEN,), ATOM_PAD_VAL, dtype=float)
-                    tmp[:arr.size] = arr
-                    features[i, j, :] = tmp
-    return features
+            feature_now.append(attributes)
+
+        num_now = mol.GetNumAtoms()
+        if num_now < MAX_ATOMNUM:
+            # pad down
+            for _ in range(MAX_ATOMNUM-num_now):
+                feature_now.append([ATOM_PAD_VAL]*len(attributes))
+
+        atoms_features.append(feature_now)
+
+    return np.array(atoms_features)
 
 
 
@@ -121,22 +110,23 @@ def calculate_graph_distance_matrix(mols, MAX_ATOMNUM, ATOM_PAD_VAL):
     """
     Calculate atoms pairwise graph distance matrix of molecule.
     """
-    n_mols = len(mols)
-    distance_graph = np.full((n_mols, MAX_ATOMNUM, MAX_ATOMNUM), ATOM_PAD_VAL, dtype=float)
-    for i, mol in enumerate(tqdm(mols)):
-        if mol is None:
-            continue
+    distance_graph = []
+    for mol in tqdm(mols):
         num_now = mol.GetNumAtoms()
-        full_mat = Chem.rdmolops.GetDistanceMatrix(mol)
-        import numpy as _np
-        mat = _np.array(full_mat)
-        if mat.size == 0:
-            continue
-        if num_now >= MAX_ATOMNUM:
-            distance_graph[i] = mat[:MAX_ATOMNUM, :MAX_ATOMNUM]
-        else:
-            distance_graph[i, :num_now, :num_now] = mat
-    return distance_graph
+        matrix = Chem.rdmolops.GetDistanceMatrix(mol).tolist()
+
+        if num_now < MAX_ATOMNUM:
+            # pad right
+            for i in range(len(matrix)):
+                for _ in range(MAX_ATOMNUM-num_now):
+                    matrix[i].append(ATOM_PAD_VAL)
+            # pad down
+            for _ in range(MAX_ATOMNUM-num_now):
+                matrix.append([ATOM_PAD_VAL]*MAX_ATOMNUM)
+
+        distance_graph.append(matrix)
+
+    return np.array(distance_graph)
 
 
 
@@ -145,40 +135,23 @@ def calculate_conf_distance_matrix(mols, MAX_ATOMNUM, ATOM_PAD_VAL):
     """
     Calculate atoms pairwise 3D distance matrix of molecule.
     """
-    n_mols = len(mols)
-    distance_conf = np.full((n_mols, MAX_ATOMNUM, MAX_ATOMNUM), ATOM_PAD_VAL, dtype=float)
-    import numpy as _np
-    for i, mol in enumerate(tqdm(mols)):
-        if mol is None:
-            continue
+    distance_conf = []
+    for mol in tqdm(mols):
         num_now = mol.GetNumAtoms()
-        try:
-            full_mat = AllChem.Get3DDistanceMatrix(mol)
-            mat = _np.array(full_mat)
-            if mat.size == 0:
-                # try compute from conformer if available
-                if mol.GetNumConformers() > 0:
-                    conf = mol.GetConformer(0)
-                    coords = _np.array([list(conf.GetAtomPosition(i)) for i in range(mol.GetNumAtoms())])
-                    d = _np.linalg.norm(coords[:, None, :] - coords[None, :, :], axis=-1)
-                    mat = d
-                else:
-                    continue
-        except Exception:
-            if mol.GetNumConformers() > 0:
-                conf = mol.GetConformer(0)
-                coords = _np.array([list(conf.GetAtomPosition(i)) for i in range(mol.GetNumAtoms())])
-                mat = _np.linalg.norm(coords[:, None, :] - coords[None, :, :], axis=-1)
-            else:
-                continue
+        matrix = AllChem.Get3DDistanceMatrix(mol).tolist()
 
-        if num_now >= MAX_ATOMNUM:
-            distance_conf[i] = mat[:MAX_ATOMNUM, :MAX_ATOMNUM]
-        else:
-            distance_conf[i, :num_now, :num_now] = mat
+        if num_now < MAX_ATOMNUM:
+            # pad right
+            for i in range(len(matrix)):
+                for _ in range(MAX_ATOMNUM-num_now):
+                    matrix[i].append(ATOM_PAD_VAL)
+            # pad down
+            for _ in range(MAX_ATOMNUM-num_now):
+                matrix.append([ATOM_PAD_VAL]*MAX_ATOMNUM)
 
+        distance_conf.append(matrix)
     # NOTE: Round to 4 decimal places
-    return np.round(distance_conf, 4)
+    return np.round(np.array(distance_conf), 4)
 
 
 
@@ -187,19 +160,20 @@ def calculate_bond_type_matrix(mols, MAX_ATOMNUM):
     """
     Calculate atoms pairwise bond type matrix of molecule.
     """
-    n_mols = len(mols)
-    bond_types = np.zeros((n_mols, MAX_ATOMNUM, MAX_ATOMNUM), dtype=float)
+    bond_types = []
     weight = [1, 2, 3, 1.5]
-    for idx, mol in enumerate(tqdm(mols)):
-        if mol is None:
-            continue
+    for mol in tqdm(mols):
+        matrix = np.zeros([MAX_ATOMNUM, MAX_ATOMNUM])
         for bond in mol.GetBonds():
             a1 = bond.GetBeginAtomIdx()
             a2 = bond.GetEndAtomIdx()
-            if a1 >= MAX_ATOMNUM or a2 >= MAX_ATOMNUM:
-                continue
             bt = bond.GetBondType()
+
             bond_feats = [bt == Chem.rdchem.BondType.SINGLE, bt == Chem.rdchem.BondType.DOUBLE, bt == Chem.rdchem.BondType.TRIPLE, bt == Chem.rdchem.BondType.AROMATIC]
+            # for i, m in enumerate(bond_feats):
+            #     if m == True:
+            #         b = weight[i]
+            # NOTE: 1.4 is conjugated bond
             for i, m in enumerate(bond_feats):
                 if m == True and i != 0:
                     b = weight[i]
@@ -208,12 +182,13 @@ def calculate_bond_type_matrix(mols, MAX_ATOMNUM):
                         b = 1.4
                     else:
                         b = 1
-                else:
-                    continue
-            bond_types[idx, a1, a2] = b
-            bond_types[idx, a2, a1] = b
+                else:pass
 
-    return bond_types
+            matrix[a1, a2] = b
+            matrix[a2, a1] = b
+        bond_types.append(matrix)
+
+    return np.array(bond_types)
 
 
 
@@ -226,7 +201,7 @@ def generate_atom_input(config, df, df_enu, mols, folder_path, set_name):
     ATOM_PAD_VAL = config['data']['atom_pad_val']
     REPLICA_NUM = config['augmentation']['replica_num']
 
-    os.makedirs(f"{folder_path}/Trans/{REPLICA_NUM}/", exist_ok=True)
+    os.makedirs(f"{folder_path}/Trans/{REPLICA_NUM}/", exist_ok=False)
 
     # Peptide information
     id = df_enu['ID'].to_numpy()
@@ -255,26 +230,6 @@ def generate_atom_input(config, df, df_enu, mols, folder_path, set_name):
 
     # 3D distance matrix (Conf)
     conf = calculate_conf_distance_matrix(mols, MAX_ATOMNUM, ATOM_PAD_VAL)
-    # ensure conf has expected shape (n_mols, MAX_ATOMNUM, MAX_ATOMNUM)
-    try:
-        conf = np.asarray(conf)
-        if conf.ndim != 3 or conf.shape[1] != MAX_ATOMNUM or conf.shape[2] != MAX_ATOMNUM:
-            n_mols = len(mols)
-            conf_safe = np.full((n_mols, MAX_ATOMNUM, MAX_ATOMNUM), ATOM_PAD_VAL, dtype=float)
-            # if conf provides some valid entries, copy those into safe array where possible
-            try:
-                min_n = min(conf.shape[0], n_mols)
-                min_r = min(conf.shape[1] if conf.ndim>1 else 0, MAX_ATOMNUM)
-                min_c = min(conf.shape[2] if conf.ndim>2 else 0, MAX_ATOMNUM)
-                if conf.ndim == 3 and min_n>0 and min_r>0 and min_c>0:
-                    conf_safe[:min_n, :min_r, :min_c] = conf[:min_n, :min_r, :min_c]
-            except Exception:
-                pass
-            conf = conf_safe
-    except Exception:
-        n_mols = len(mols)
-        conf = np.full((n_mols, MAX_ATOMNUM, MAX_ATOMNUM), ATOM_PAD_VAL, dtype=float)
-
     np.savez_compressed(f"{folder_path}/Trans/{REPLICA_NUM}/conf_{REPLICA_NUM}_{set_name}.npz", conf=conf)
 
 

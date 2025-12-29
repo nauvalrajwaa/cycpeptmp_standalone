@@ -38,19 +38,19 @@ def load_dataset(folder_path, model_type, replica_num, set_name, _10cv=False):
     # folder_path = os.path.join(current_dir, 'input')
 
     if _10cv: # For 10 cv
-        load_node = np.load(f'{folder_path}/Trans/{replica_num}/10cv/node_{replica_num}_{set_name}.npz')
-        load_graph = np.load(f'{folder_path}/Trans/{replica_num}/10cv/graph_{replica_num}_{set_name}.npz')
-        load_conf = np.load(f'{folder_path}/Trans/{replica_num}/10cv/conf_{replica_num}_{set_name}.npz')
-        load_bond = np.load(f'{folder_path}/Trans/{replica_num}/10cv/bond_{replica_num}_{set_name}.npz')
-        load_monomers = np.load(f'{folder_path}/CNN/{replica_num}/10cv/feature_map_{replica_num}_{set_name}.npz')
-        load_peptides = np.load(f'{folder_path}/MLP/{replica_num}/10cv/peptide_{replica_num}_{set_name}.npz')
+        load_node = np.load(f'{folder_path}/Trans/{replica_num}/10cv/node_{replica_num}_{set_name}.npz', allow_pickle=True)
+        load_graph = np.load(f'{folder_path}/Trans/{replica_num}/10cv/graph_{replica_num}_{set_name}.npz', allow_pickle=True)
+        load_conf = np.load(f'{folder_path}/Trans/{replica_num}/10cv/conf_{replica_num}_{set_name}.npz', allow_pickle=True)
+        load_bond = np.load(f'{folder_path}/Trans/{replica_num}/10cv/bond_{replica_num}_{set_name}.npz', allow_pickle=True)
+        load_monomers = np.load(f'{folder_path}/CNN/{replica_num}/10cv/feature_map_{replica_num}_{set_name}.npz', allow_pickle=True)
+        load_peptides = np.load(f'{folder_path}/MLP/{replica_num}/10cv/peptide_{replica_num}_{set_name}.npz', allow_pickle=True)
     else: # For test set
-        load_node = np.load(f'{folder_path}/Trans/{replica_num}/node_{replica_num}_{set_name}.npz')
-        load_graph = np.load(f'{folder_path}/Trans/{replica_num}/graph_{replica_num}_{set_name}.npz')
-        load_conf = np.load(f'{folder_path}/Trans/{replica_num}/conf_{replica_num}_{set_name}.npz')
-        load_bond = np.load(f'{folder_path}/Trans/{replica_num}/bond_{replica_num}_{set_name}.npz')
-        load_monomers = np.load(f'{folder_path}/CNN/{replica_num}/feature_map_{replica_num}_{set_name}.npz')
-        load_peptides = np.load(f'{folder_path}/MLP/{replica_num}/peptide_{replica_num}_{set_name}.npz')
+        load_node = np.load(f'{folder_path}/Trans/{replica_num}/node_{replica_num}_{set_name}.npz', allow_pickle=True)
+        load_graph = np.load(f'{folder_path}/Trans/{replica_num}/graph_{replica_num}_{set_name}.npz', allow_pickle=True)
+        load_conf = np.load(f'{folder_path}/Trans/{replica_num}/conf_{replica_num}_{set_name}.npz', allow_pickle=True)
+        load_bond = np.load(f'{folder_path}/Trans/{replica_num}/bond_{replica_num}_{set_name}.npz', allow_pickle=True)
+        load_monomers = np.load(f'{folder_path}/CNN/{replica_num}/feature_map_{replica_num}_{set_name}.npz', allow_pickle=True)
+        load_peptides = np.load(f'{folder_path}/MLP/{replica_num}/peptide_{replica_num}_{set_name}.npz', allow_pickle=True)
 
     if model_type == 'Trans':
         dataset_now = DataSet(list(zip(torch.Tensor(load_peptides['id'].reshape(-1,1)).to(torch.int32),

@@ -1,0 +1,24 @@
+name: cycpeptmp
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - rdkit
+  - mordred
+  - pandas
+  - numpy
+  - scipy
+  - scikit-learn
+  - tqdm
+  - matplotlib
+  - seaborn
+  - networkx
+  - openbabel
+  - pip:
+    - torch
+    - torchvision
+    - torchaudio
+    - rdkit-pypi
+    - joblib

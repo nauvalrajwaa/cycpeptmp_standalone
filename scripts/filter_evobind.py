@@ -20,6 +20,7 @@ def main():
     parser.add_argument('--loss', type=float, default=None, help='Optional loss threshold to filter by')
     parser.add_argument('--loss-op', choices=['gte','gt','lte','lt'], default='lte', help='Loss comparison operator (default: lte)')
     parser.add_argument('--output', '-o', default='scripts/test_filtered.txt', help='Output txt file (one sequence per line)')
+    parser.add_argument('--sort-by', choices=['plddt','loss'], default=None, help='Optional sort for output CSV/txt: "plddt" (high->low) or "loss" (low->high)')
     args = parser.parse_args()
 
     if not os.path.exists(args.input):
@@ -58,30 +59,52 @@ def main():
 
         mask = mask & loss_mask
 
-    selected = df.loc[mask, 'sequence'].astype(str).str.strip()
+    # Get filtered dataframe
+    df_filtered = df.loc[mask].copy()
+    
+    # Deduplicate by sequence while preserving order
+    df_filtered = df_filtered.drop_duplicates(subset='sequence', keep='first')
 
+    # Optional sorting: plddt (desc) or loss (asc)
+    if args.sort_by is not None:
+        if args.sort_by == 'plddt':
+            if 'plddt' in df_filtered.columns:
+                df_filtered = df_filtered.sort_values(by='plddt', ascending=False)
+            else:
+                print('Warning: sort-by plddt requested but "plddt" column not present; skipping sort.')
+        elif args.sort_by == 'loss':
+            if 'loss' in df_filtered.columns:
+                df_filtered = df_filtered.sort_values(by='loss', ascending=True)
+            else:
+                print('Warning: sort-by loss requested but "loss" column not present; skipping sort.')
+    
+    if df_filtered.empty:
+        print('Warning: no sequences matched the pLDDT/loss thresholds; wrote empty files.')
+    
     out_dir = os.path.dirname(args.output)
     if out_dir and not os.path.exists(out_dir):
         os.makedirs(out_dir, exist_ok=True)
 
-    selected_list = [s for s in selected.tolist() if s]
-    # remove duplicates while preserving order
-    seen = set()
-    unique_seqs = []
-    for s in selected_list:
-        if s not in seen:
-            seen.add(s)
-            unique_seqs.append(s)
-    selected_list = unique_seqs
-
-    if not selected_list:
-        print('Warning: no sequences matched the pLDDT/loss thresholds; wrote empty file.')
-
+    # Write txt file (sequences only)
+    sequences = df_filtered['sequence'].astype(str).str.strip().tolist()
     with open(args.output, 'w') as f:
-        for seq in selected_list:
-            f.write(seq + '\n')
+        for seq in sequences:
+            if seq:
+                f.write(seq + '\n')
 
-    print(f'Wrote {len(selected_list)} unique sequences to: {args.output}')
+    # Write csv file (with metadata columns)
+    csv_output = args.output.rsplit('.', 1)[0] + '.csv'
+    cols_to_save = []
+    for col in ['iteration', 'loss', 'plddt', 'sequence']:
+        if col in df_filtered.columns:
+            cols_to_save.append(col)
+    
+    if cols_to_save:
+        df_filtered[cols_to_save].to_csv(csv_output, index=False)
+        print(f'Wrote {len(df_filtered)} unique sequences to: {args.output}')
+        print(f'Wrote {len(df_filtered)} rows with metadata to: {csv_output}')
+    else:
+        print(f'Wrote {len(df_filtered)} unique sequences to: {args.output}')
 
 
 if __name__ == '__main__':

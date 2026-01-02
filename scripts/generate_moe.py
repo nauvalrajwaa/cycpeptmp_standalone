@@ -131,7 +131,7 @@ def main():
     p.add_argument('--run-id', help='Use an existing run folder under runs/<run-id> (will use its sdf/*).')
     p.add_argument('--sequences-file', help='Plain txt file with one AA sequence per line to generate SDFs.')
     p.add_argument('--sequence', help='Single AA sequence string to generate SDF for (alternative to --sequences-file)')
-    p.add_argument('--out-dir', required=True, help='Directory to write MDB/CSV outputs to (OUT_DIR passed to bash scripts)')
+    p.add_argument('--out-dir', help='Directory to write MDB/CSV outputs to (OUT_DIR passed to bash scripts). If omitted, defaults to out_moe/<run-id>')
     p.add_argument('--moe-bin', help='Path to moebatch executable (optional). Will be passed to bash scripts as MOE_BIN env var.')
     p.add_argument('--scripts-dir', default='scripts', help='Directory containing run_moe_2d.sh and run_moe_3d.sh')
     p.add_argument('--dry-run', action='store_true', help='Print actions without executing the bash scripts')
@@ -173,7 +173,16 @@ def main():
         peptide_sdf, monomer_sdf = generate_sdfs_from_sequences(sequences, base_run)
         print('Generated SDFs under:', os.path.join(base_run, 'sdf'))
 
-    out_dir = args.out_dir
+    # Determine OUT_DIR: prefer explicit arg, otherwise use out_moe/<run_id>
+    # Choose run identifier for OUT_DIR (args.run_id when provided, otherwise generated run_id)
+    run_identifier = None
+    if args.run_id:
+        run_identifier = args.run_id
+    else:
+        # extract run id from base_run path created above
+        run_identifier = os.path.basename(base_run)
+
+    out_dir = args.out_dir if args.out_dir else os.path.join('out_moe', run_identifier)
     os.makedirs(out_dir, exist_ok=True)
 
     # paths to the user-provided bash scripts

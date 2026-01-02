@@ -22,7 +22,7 @@ run_moe_mdb() {
     echo "========================================================="
 
     local LINUX_IN="$RUN_DIR/sdf/${BASENAME}.sdf"
-    local LINUX_OUT_MDB="$OUT_DIR/${BASENAME}_final.mdb"
+    local LINUX_OUT_MDB="$OUT_DIR/${BASENAME}_moe_2D.mdb"
     
     # Cek input
     if [ ! -f "$LINUX_IN" ]; then

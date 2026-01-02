@@ -29,6 +29,7 @@ def generate_peptide_conformation(config, df, file_path):
             # TODO: Add more force fields
 
             mol.SetProp("_Name", str(id[i]))
+            mol.SetProp("SMILES", smi)
             writer.write(mol)
 
         writer.close()
@@ -83,6 +84,7 @@ def generate_monomer_conformation(config, df, file_path):
                 mol.SetProp('cid', str(cid))
                 mol.SetProp('Energy', str(energy[j][0]))
                 mol.SetProp('Relative energy', str(relative_energy[j][0]))
+                mol.SetProp('SMILES', smi)
                 writer.write(mol, confId=cid)
 
         writer.close()

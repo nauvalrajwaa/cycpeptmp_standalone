@@ -70,3 +70,40 @@
 
 ## Contact
 - Jianan Li: li@bi.c.titech.ac.jp
+
+## Generate → Predict (full commands)
+
+Follow these steps to go from SMILES/sequence to final prediction for a single run. Replace `run_YYYYMMDD_HHMMSS_moe` with the actual run id created by `generate_moe.py`.
+
+1) Generate SDFs and run MOE (produces MDB/CSV in out_moe/<run-id> by default):
+
+```bash
+# generate SDFs from a sequences file and run the MOE bash scripts
+python scripts/generate_moe.py --sequences-file path/to/sequences.txt
+
+# OR if you already have a run folder with SDFs and want to run MOE using that run id
+python scripts/generate_moe.py --run-id run_YYYYMMDD_HHMMSS_moe
+
+# Optional: pass a custom MOE binary path (Windows/WSL) or an explicit out dir
+python scripts/generate_moe.py --sequences-file path/to/sequences.txt --moe-bin "/mnt/c/Program Files/moe2022/bin/moebatch.exe"
+python scripts/generate_moe.py --sequences-file path/to/sequences.txt --out-dir out_moe/run_custom
+```
+
+Notes:
+- If you do not pass `--out-dir`, the script writes MOE outputs to `out_moe/<run-id>`.
+- After MOE finishes, convert MDB -> CSV (if your MOE workflow doesn't already) and place the CSVs into the OUT_DIR; `generate_moe.py` will copy recognized CSVs into `runs/<run-id>/desc/` and run the automatic CSV fixer.
+
+2) Run prediction (resume mode uses existing run artifacts and the `desc/` MOE CSVs):
+
+```bash
+# basic resume prediction using MOE outputs stored in the run's desc/ folder
+python scripts/predict.py --resume runs/run_YYYYMMDD_HHMMSS_moe --moe-dir runs/run_YYYYMMDD_HHMMSS_moe/desc
+
+# optional flags: --moebatch <script> if you need to call a specific moebatch wrapper, --resume uses existing model_input if present
+python scripts/predict.py --resume runs/run_YYYYMMDD_HHMMSS_moe --moe-dir runs/run_YYYYMMDD_HHMMSS_moe/desc --moebatch run_moe_2d.sh
+```
+
+Output:
+- Predictions are written to `runs/<run-id>/predicted/new_prediction.csv`. The CSV contains both `pred_raw` (network output) and `pred` (clipped to the configured bounds).
+
+If you want me to add a short example sequences file or automate MDB->CSV conversion steps, I can add that next.

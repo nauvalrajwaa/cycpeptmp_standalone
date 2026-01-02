@@ -129,6 +129,7 @@ def main():
     parser.add_argument('--outdir', type=str, default='runs', help="Base output directory for runs (default: 'runs').")
     parser.add_argument('--resume', type=str, default=None, help='Path to an existing run folder to resume prediction (skips preprocessing).')
     parser.add_argument('--moe-dir', type=str, default=None, help='Directory containing MOE CSVs to integrate (peptide_moe_2D.csv, peptide_moe_3D.csv, monomer_moe_2D.csv, monomer_moe_3D.csv).')
+    parser.add_argument('--moebatch', type=str, default=None, help='Path to moebatch executable (Windows or WSL).')
     parser.add_argument('--batch-size', type=int, default=None, help='Optional batch size for prediction DataLoader (default: all samples)')
     args = parser.parse_args()
 

@@ -1,99 +1,158 @@
 #!/usr/bin/env python3
-"""Wrapper to run MOE (moebatch) jobs to generate MOE descriptor CSVs.
+"""Run MOE workflow via the provided bash scripts (run_moe_2d.sh, run_moe_3d.sh).
 
-This script runs MOE jobs (SVL) to produce 2D/3D descriptor CSVs for peptides and monomers.
-It supports running by `--run-id` (uses runs/<run_id>/sdf/*.sdf) or by explicit SDF paths.
+This script will:
+ - create a run folder (or use --run-id) and generate peptide/monomer SDFs from sequences
+ - call the two user-provided bash scripts to produce MDB outputs
+ - leave MDBs in the specified output folder for the user to convert to CSV manually
 
-Defaults assume `moebatch -job <svl> -in <sdf> -out <csv>` works for your MOE installation.
-Adjust job filenames with the flags if your setup differs.
+Important: The bash scripts are not modified by this script. We call them and set
+`RUN_DIR` and `OUT_DIR` via the environment. The bash scripts should respect these
+environment variables (they already do if they use ${RUN_DIR:-...} style defaults).
 
-Example:
-  python scripts/generate_moe.py --run-id run_20251230_204756 --out-dir /tmp/moe_csvs \
-    --job-peptide-2d compute_peptide_2D.svl --job-peptide-3d compute_peptide_3D.svl \
-    --job-monomer-2d compute_monomer_2D.svl --job-monomer-3d compute_monomer_3D.svl
+Usage examples:
+  python scripts/generate_moe.py --sequences-file my_seqs.txt --out-dir out/moe_results
+  python scripts/generate_moe.py --run-id run_20260102_132527_moe --out-dir out/moe_results
 
-Or point directly to SDFs:
-  python scripts/generate_moe.py --peptide-sdf runs/run_xxx/sdf/peptide.sdf --monomer-sdf runs/run_xxx/sdf/monomer.sdf --out-dir /tmp/moe_csvs
 """
 import argparse
 import os
-import shutil
 import subprocess
 import sys
 import datetime
 import json
 
-# make sure repo utils are importable
+# ensure repo utils are importable
 sys.path.append(os.getcwd())
 from utils import utils_function
 from utils import generate_conformation
 
 
-def find_moebatch(provided=None):
-    if provided:
-        if os.path.exists(provided):
-            return provided
-        print(f'Provided moebatch path not found: {provided}')
-        return None
-    mb = shutil.which('moebatch')
-    return mb
+def generate_sdfs_from_sequences(sequences, base_run):
+    AA_TO_SMILES = {
+        'A': 'CN[C@@H](C)C=O',
+        'C': 'CN[C@H](C=O)CS',
+        'D': 'CN[C@H](C=O)CC(=O)O',
+        'E': 'CN[C@H](C=O)CCC(=O)O',
+        'F': 'CN[C@H](C=O)Cc1ccccc1',
+        'G': 'CNCC=O',
+        'H': 'CN[C@H](C=O)Cc1c[nH]cn1',
+        'I': 'CC[C@H](C)[C@@H](C=O)NC',
+        'K': 'CN[C@H](C=O)CCCCN',
+        'L': 'CN[C@H](C=O)CC(C)C',
+        'M': 'CN[C@H](C=O)CCSC',
+        'N': 'CN[C@H](C=O)CC(N)=O',
+        'P': 'CN1CCC[C@H]1C=O',
+        'Q': 'CN[C@H](C=O)CCC(N)=O',
+        'R': 'CN[C@H](C=O)CCCNC(=N)N',
+        'S': 'CN[C@H](C=O)CO',
+        'T': 'CN[C@H](C=O)[C@@H](C)OC',
+        'V': 'CN[C@H](C=O)C(C)C',
+        'W': 'CN[C@H](C=O)Cc1c[nH]c2ccccc12',
+        'Y': 'CN[C@H](C=O)Cc1ccc(O)cc1'
+    }
+
+    dir_data = os.path.join(base_run, 'data')
+    dir_sdf = os.path.join(base_run, 'sdf')
+    os.makedirs(dir_data, exist_ok=True)
+    os.makedirs(dir_sdf, exist_ok=True)
+
+    data_rows = []
+    for idx, seq in enumerate(sequences):
+        sequ = seq.upper().strip()
+        monomers = []
+        valid = True
+        for aa in sequ:
+            if aa in AA_TO_SMILES:
+                monomers.append(AA_TO_SMILES[aa])
+            else:
+                print(f'Warning: Unknown amino acid "{aa}" in sequence {sequ}; skipping sequence')
+                valid = False
+                break
+        if not valid:
+            continue
+        row = {
+            'ID': f'pept{idx+1}',
+            'ID_org': f'seq_{idx+1}_{sequ}',
+            'SMILES': '.'.join(monomers),
+            'Monomer_number': len(monomers),
+            'Monomer_number_in_main_chain': len(monomers),
+            'shape': 'Unknown',
+            'permeability': 0
+        }
+        for i, m in enumerate(monomers):
+            row[f'Substructure-{i+1}'] = m
+        data_rows.append(row)
+
+    if not data_rows:
+        print('No valid sequences to generate SDFs.', file=sys.stderr)
+        sys.exit(2)
+
+    import pandas as pd
+    df = pd.DataFrame(data_rows)
+    df.to_csv(os.path.join(dir_data, 'new_data.csv'), index=False)
+
+    cfg_path = os.path.join('config', 'CycPeptMP.json')
+    cfg = {}
+    if os.path.exists(cfg_path):
+        try:
+            cfg = json.load(open(cfg_path, 'r'))
+        except Exception:
+            cfg = {}
+
+    utils_function.get_unique_monomer(df, os.path.join(dir_data, 'unique_monomer.csv'))
+    utils_function.enumerate_smiles(df, cfg, os.path.join(dir_data, 'enum_smiles.csv'))
+
+    df_enu = pd.read_csv(os.path.join(dir_data, 'enum_smiles.csv'))
+    generate_conformation.generate_peptide_conformation(cfg, df_enu, os.path.join(dir_sdf, 'peptide.sdf'))
+    df_monomer = pd.read_csv(os.path.join(dir_data, 'unique_monomer.csv'))
+    generate_conformation.generate_monomer_conformation(cfg, df_monomer, os.path.join(dir_sdf, 'monomer.sdf'))
+
+    return os.path.join(dir_sdf, 'peptide.sdf'), os.path.join(dir_sdf, 'monomer.sdf')
 
 
-def run_job(moebatch, jobfile, input_sdf, out_csv, dry_run=False):
-    cmd = [moebatch, '-job', jobfile, '-in', input_sdf, '-out', out_csv]
-    print('Running:', ' '.join(cmd))
+def call_bash_script(script_path, env_overrides, dry_run=False):
+    cmd_env = os.environ.copy()
+    cmd_env.update(env_overrides)
+    cmd = ['bash', script_path]
+    print('Calling:', ' '.join(cmd), 'with env:', {k: env_overrides[k] for k in env_overrides})
     if dry_run:
-        return 0
+        return 0, 'dry-run'
     try:
-        res = subprocess.run(cmd, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        print(res.stdout.decode(errors='ignore'))
-        if res.returncode != 0:
-            print('moebatch stderr:', res.stderr.decode(errors='ignore'), file=sys.stderr)
-        return res.returncode
-    except FileNotFoundError:
-        print('Error: moebatch executable not found.', file=sys.stderr)
-        return 127
+        proc = subprocess.run(cmd, env=cmd_env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        print(proc.stdout)
+        return proc.returncode, proc.stdout
+    except Exception as e:
+        return 1, str(e)
 
 
 def main():
-    p = argparse.ArgumentParser(description='Generate MOE descriptor CSVs using moebatch')
-    p.add_argument('--run-id', help='Run id under runs/ (uses runs/<run_id>/sdf/*.sdf)')
-    p.add_argument('--peptide-sdf', help='Path to peptide.sdf')
-    p.add_argument('--monomer-sdf', help='Path to monomer.sdf')
-    p.add_argument('--sequences-file', help='Plain txt file with one AA sequence per line. If provided, SDFs will be generated.')
+    p = argparse.ArgumentParser(description='Run provided MOE bash scripts to create MDB outputs.')
+    p.add_argument('--run-id', help='Use an existing run folder under runs/<run-id> (will use its sdf/*).')
+    p.add_argument('--sequences-file', help='Plain txt file with one AA sequence per line to generate SDFs.')
     p.add_argument('--sequence', help='Single AA sequence string to generate SDF for (alternative to --sequences-file)')
-    p.add_argument('--out-dir', required=True, help='Directory to write MOE CSVs to')
-    p.add_argument('--moebatch', help='Path to moebatch executable (optional)')
-    p.add_argument('--job-peptide-2d', default='compute_peptide_2D.svl', help='MOE SVL job for peptide 2D')
-    p.add_argument('--job-peptide-3d', default='compute_peptide_3D.svl', help='MOE SVL job for peptide 3D')
-    p.add_argument('--job-monomer-2d', default='compute_monomer_2D.svl', help='MOE SVL job for monomer 2D')
-    p.add_argument('--job-monomer-3d', default='compute_monomer_3D.svl', help='MOE SVL job for monomer 3D')
-    p.add_argument('--dry-run', action='store_true', help='Print commands without running')
+    p.add_argument('--out-dir', required=True, help='Directory to write MDB/CSV outputs to (OUT_DIR passed to bash scripts)')
+    p.add_argument('--moe-bin', help='Path to moebatch executable (optional). Will be passed to bash scripts as MOE_BIN env var.')
+    p.add_argument('--scripts-dir', default='scripts', help='Directory containing run_moe_2d.sh and run_moe_3d.sh')
+    p.add_argument('--dry-run', action='store_true', help='Print actions without executing the bash scripts')
     args = p.parse_args()
 
-    # If a run-id is provided, use its sdf folder
-    peptide_sdf = args.peptide_sdf
-    monomer_sdf = args.monomer_sdf
-    temp_run_created = False
+    # Determine run folder and SDFs
     if args.run_id and not (args.sequences_file or args.sequence):
-        base = os.path.join('runs', args.run_id)
-        peptide_sdf = os.path.join(base, 'sdf', 'peptide.sdf')
-        monomer_sdf = os.path.join(base, 'sdf', 'monomer.sdf')
-
-    # If sequences provided, generate a temporary run folder (SDFs) using the same pipeline logic
-    if args.sequences_file or args.sequence:
-        # create a run folder under runs/
-        run_id = datetime.datetime.now().strftime('run_%Y%m%d_%H%M%S_moe')
-        base = os.path.join('runs', run_id)
-        dir_data = os.path.join(base, 'data')
-        dir_sdf = os.path.join(base, 'sdf')
-        os.makedirs(dir_data, exist_ok=True)
-        os.makedirs(dir_sdf, exist_ok=True)
-
-        # build new_data dataframe from sequences
+        base_run = os.path.join('runs', args.run_id)
+        if not os.path.exists(base_run):
+            print(f'Error: run folder not found: {base_run}', file=sys.stderr)
+            sys.exit(2)
+        dir_sdf = os.path.join(base_run, 'sdf')
+        peptide_sdf = os.path.join(dir_sdf, 'peptide.sdf')
+        monomer_sdf = os.path.join(dir_sdf, 'monomer.sdf')
+        if not os.path.exists(peptide_sdf) or not os.path.exists(monomer_sdf):
+            print('Error: expected SDFs not present under the run folder.', file=sys.stderr)
+            sys.exit(2)
+    else:
         sequences = []
         if args.sequence:
-            sequences.append(args.sequence.strip())
+            sequences.append(args.sequence)
         if args.sequences_file:
             if not os.path.exists(args.sequences_file):
                 print(f'Error: sequences file not found: {args.sequences_file}', file=sys.stderr)
@@ -103,145 +162,57 @@ def main():
                     s = line.strip()
                     if s:
                         sequences.append(s)
-
         if not sequences:
-            print('Error: no sequences provided to generate SDFs', file=sys.stderr)
+            print('Error: no sequences provided; use --sequences-file or --sequence or --run-id', file=sys.stderr)
             sys.exit(2)
 
-        # map 1-letter AA to SMILES (same mapping as predict.py)
-        AA_TO_SMILES = {
-            'A': 'CN[C@@H](C)C=O',
-            'C': 'CN[C@H](C=O)CS',
-            'D': 'CN[C@H](C=O)CC(=O)O',
-            'E': 'CN[C@H](C=O)CCC(=O)O',
-            'F': 'CN[C@H](C=O)Cc1ccccc1',
-            'G': 'CNCC=O',
-            'H': 'CN[C@H](C=O)Cc1c[nH]cn1',
-            'I': 'CC[C@H](C)[C@@H](C=O)NC',
-            'K': 'CN[C@H](C=O)CCCCN',
-            'L': 'CN[C@H](C=O)CC(C)C',
-            'M': 'CN[C@H](C=O)CCSC',
-            'N': 'CN[C@H](C=O)CC(N)=O',
-            'P': 'CN1CCC[C@H]1C=O',
-            'Q': 'CN[C@H](C=O)CCC(N)=O',
-            'R': 'CN[C@H](C=O)CCCNC(=N)N',
-            'S': 'CN[C@H](C=O)CO',
-            'T': 'CN[C@H](C=O)[C@@H](C)OC',
-            'V': 'CN[C@H](C=O)C(C)C',
-            'W': 'CN[C@H](C=O)Cc1c[nH]c2ccccc12',
-            'Y': 'CN[C@H](C=O)Cc1ccc(O)cc1'
-        }
-
-        data_rows = []
-        for idx, seq in enumerate(sequences):
-            sequ = seq.upper().strip()
-            monomers = []
-            valid = True
-            for aa in sequ:
-                if aa in AA_TO_SMILES:
-                    monomers.append(AA_TO_SMILES[aa])
-                else:
-                    print(f'Warning: Unknown amino acid "{aa}" in sequence {sequ}; skipping sequence')
-                    valid = False
-                    break
-            if not valid:
-                continue
-            row = {
-                'ID': f'pept{idx+1}',
-                'ID_org': f'seq_{idx+1}_{sequ}',
-                'SMILES': '.'.join(monomers),
-                'Monomer_number': len(monomers),
-                'Monomer_number_in_main_chain': len(monomers),
-                'shape': 'Unknown',
-                'permeability': 0
-            }
-            for i, m in enumerate(monomers):
-                row[f'Substructure-{i+1}'] = m
-            data_rows.append(row)
-
-        if not data_rows:
-            print('No valid sequences produced SDFs.', file=sys.stderr)
-            sys.exit(2)
-
-        import pandas as pd
-        new_data_df = pd.DataFrame(data_rows)
-        new_data_df.to_csv(os.path.join(dir_data, 'new_data.csv'), index=False)
-
-        # generate unique monomers and enum_smiles using utils
-        utils_function.get_unique_monomer(new_data_df, os.path.join(dir_data, 'unique_monomer.csv'))
-        config_dummy = {}
-        # Try to read existing config if present
-        cfg_path = os.path.join('config', 'CycPeptMP.json')
-        if os.path.exists(cfg_path):
-            try:
-                config_dummy = json.load(open(cfg_path, 'r'))
-            except Exception:
-                config_dummy = {}
-        utils_function.enumerate_smiles(new_data_df, config_dummy, os.path.join(dir_data, 'enum_smiles.csv'))
-
-        # generate conformations
-        df_enu = None
-        import pandas as pd
-        df_enu = pd.read_csv(os.path.join(dir_data, 'enum_smiles.csv'))
-        generate_conformation.generate_peptide_conformation(config_dummy, df_enu, os.path.join(dir_sdf, 'peptide.sdf'))
-        df_monomer = pd.read_csv(os.path.join(dir_data, 'unique_monomer.csv'))
-        generate_conformation.generate_monomer_conformation(config_dummy, df_monomer, os.path.join(dir_sdf, 'monomer.sdf'))
-
-        peptide_sdf = os.path.join(dir_sdf, 'peptide.sdf')
-        monomer_sdf = os.path.join(dir_sdf, 'monomer.sdf')
-        temp_run_created = True
-    else:
-        peptide_sdf = args.peptide_sdf
-        monomer_sdf = args.monomer_sdf
-
-    if not peptide_sdf or not monomer_sdf:
-        print('Error: you must provide either --run-id or both --peptide-sdf and --monomer-sdf', file=sys.stderr)
-        sys.exit(2)
-
-    if not os.path.exists(peptide_sdf):
-        print(f'Error: peptide SDF not found: {peptide_sdf}', file=sys.stderr)
-        sys.exit(2)
-    if not os.path.exists(monomer_sdf):
-        print(f'Error: monomer SDF not found: {monomer_sdf}', file=sys.stderr)
-        sys.exit(2)
+        # create a new run folder
+        run_id = datetime.datetime.now().strftime('run_%Y%m%d_%H%M%S_moe')
+        base_run = os.path.join('runs', run_id)
+        os.makedirs(base_run, exist_ok=True)
+        peptide_sdf, monomer_sdf = generate_sdfs_from_sequences(sequences, base_run)
+        print('Generated SDFs under:', os.path.join(base_run, 'sdf'))
 
     out_dir = args.out_dir
     os.makedirs(out_dir, exist_ok=True)
 
-    moebatch = find_moebatch(args.moebatch)
-    if moebatch is None:
-        print('Error: moebatch not found on PATH and no --moebatch provided.', file=sys.stderr)
+    # paths to the user-provided bash scripts
+    script_2d = os.path.join(args.scripts_dir, 'run_moe_2d.sh')
+    script_3d = os.path.join(args.scripts_dir, 'run_moe_3d.sh')
+    if not os.path.exists(script_2d) or not os.path.exists(script_3d):
+        print('Error: expected bash scripts not found under', args.scripts_dir, file=sys.stderr)
         sys.exit(2)
 
-    jobs = [
-        (args.job_peptide_2d, peptide_sdf, os.path.join(out_dir, 'peptide_moe_2D.csv')),
-        (args.job_peptide_3d, peptide_sdf, os.path.join(out_dir, 'peptide_moe_3D.csv')),
-        (args.job_monomer_2d, monomer_sdf, os.path.join(out_dir, 'monomer_moe_2D.csv')),
-        (args.job_monomer_3d, monomer_sdf, os.path.join(out_dir, 'monomer_moe_3D.csv')),
-    ]
+    # Prepare environment overrides for the bash scripts. These env vars will be available
+    # inside the scripts; the scripts should be written to respect them (use ${VAR:-default}).
+    env_overrides = {
+        'RUN_DIR': os.path.abspath(os.path.join(base_run)),
+        'OUT_DIR': os.path.abspath(out_dir),
+    }
+    if args.moe_bin:
+        env_overrides['MOE_BIN'] = args.moe_bin
 
-    failed = []
-    for jobfile, inp, outcsv in jobs:
-        if args.dry_run:
-            print('[dry-run] would run:', jobfile, inp, '->', outcsv)
-            continue
+    # Call 2D then 3D scripts
+    print('=== Executing 2D import script ===')
+    rc2, out2 = call_bash_script(script_2d, env_overrides, dry_run=args.dry_run)
+    print('2D script return code:', rc2)
 
-        rc = run_job(moebatch, jobfile, inp, outcsv, dry_run=args.dry_run)
-        if rc != 0:
-            failed.append((jobfile, rc))
+    print('\n=== Executing 3D descriptor script ===')
+    rc3, out3 = call_bash_script(script_3d, env_overrides, dry_run=args.dry_run)
+    print('3D script return code:', rc3)
 
-    print('\nMOE generation summary:')
-    for _, _, outcsv in jobs:
-        status = 'OK' if os.path.exists(outcsv) else 'MISSING'
-        print(f'  {os.path.basename(outcsv)}: {status}')
+    # Summarize outputs in OUT_DIR
+    print('\nMOE run summary (files in OUT_DIR):')
+    try:
+        for root, _, files in os.walk(out_dir):
+            for f in files:
+                fp = os.path.join(root, f)
+                size = os.path.getsize(fp)
+                print(' ', os.path.relpath(fp, out_dir), '-', size, 'bytes')
+    except Exception as e:
+        print('Could not list OUT_DIR contents:', e)
 
-    if failed:
-        print('\nSome MOE jobs failed:')
-        for jobfile, rc in failed:
-            print(f'  {jobfile}: return code {rc}')
-        sys.exit(1)
-
-    print('All MOE files generated (or present) under:', out_dir)
+    print('\nNote: This script does not convert MDB -> CSV. Please convert MDBs to CSVs manually and place them into the descriptor output folder when ready.')
 
 
 if __name__ == '__main__':

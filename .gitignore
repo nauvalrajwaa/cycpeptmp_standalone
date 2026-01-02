@@ -15,3 +15,9 @@ model/input/
 scripts/*.csv
 
 runs/
+
+plots/
+
+filtered_evobind/
+
+from_evobind/

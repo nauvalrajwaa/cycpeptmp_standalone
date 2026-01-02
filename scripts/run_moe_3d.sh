@@ -3,9 +3,11 @@
 # =================================================================
 # KONFIGURASI
 # =================================================================
-MOE_BIN="/mnt/c/Program Files/moe2022/bin/moebatch.exe"
-RUN_DIR="runs/run_20260102_132527_moe" 
-OUT_DIR="out/moe_results" # Folder output
+MOE_BIN="${MOE_BIN:-/mnt/c/Program Files/moe2022/bin/moebatch.exe}"
+# RUN_DIR should be provided by the caller (env) or fall back to the original example
+RUN_DIR="${RUN_DIR:-runs/run_20260102_132527_moe}"
+# OUT_DIR where MDB/CSV will be written; can be overridden via env
+OUT_DIR="${OUT_DIR:-out/moe_results}" # Folder output
 
 mkdir -p "$OUT_DIR"
 

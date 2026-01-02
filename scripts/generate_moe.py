@@ -203,14 +203,53 @@ def main():
 
     # Summarize outputs in OUT_DIR
     print('\nMOE run summary (files in OUT_DIR):')
+    found_csvs = []
     try:
         for root, _, files in os.walk(out_dir):
             for f in files:
                 fp = os.path.join(root, f)
                 size = os.path.getsize(fp)
                 print(' ', os.path.relpath(fp, out_dir), '-', size, 'bytes')
+                if f.lower().endswith('.csv'):
+                    found_csvs.append(fp)
     except Exception as e:
         print('Could not list OUT_DIR contents:', e)
+
+    # Ensure run desc folder exists and copy any MOE CSVs into it for downstream processing
+    run_desc = os.path.join(base_run, 'desc')
+    os.makedirs(run_desc, exist_ok=True)
+    expected = ['peptide_moe_2d.csv', 'peptide_moe_3d.csv', 'monomer_moe_2d.csv', 'monomer_moe_3d.csv']
+    copied = []
+    for csvp in found_csvs:
+        bn = os.path.basename(csvp)
+        # Normalize name to expected variants if possible
+        bnl = bn.lower()
+        for ex in expected:
+            if ex in bnl:
+                dst = os.path.join(run_desc, ex.replace('_2d','_2D').replace('_3d','_3D'))
+                try:
+                    import shutil
+                    shutil.copy(csvp, dst)
+                    copied.append(dst)
+                    print(f'Copied MOE CSV to run desc: {csvp} -> {dst}')
+                except Exception as e:
+                    print(f'Failed to copy {csvp} to {dst}: {e}')
+                break
+
+    # If any CSVs were copied, run the fixer to normalize columns and map IDs
+    fixer = os.path.join('scripts', 'fix_moe_columns.py')
+    if copied and os.path.exists(fixer):
+        print('\nRunning MOE CSV fixer to normalize columns into run desc...')
+        try:
+            rc = subprocess.run([sys.executable, fixer, run_desc, '--data', os.path.abspath('data')], check=False).returncode
+            if rc != 0:
+                print(f'fix_moe_columns.py exited with code {rc}; some files may need manual attention')
+            else:
+                print('MOE CSVs normalized and ready in run desc.')
+        except Exception as e:
+            print('Could not run fix_moe_columns.py:', e)
+    elif not copied:
+        print('\nNo MOE CSVs detected in OUT_DIR to copy into run desc. If MOE produced MDBs you must convert MDB->CSV and place them into the OUT_DIR for automatic processing.')
 
     print('\nNote: This script does not convert MDB -> CSV. Please convert MDBs to CSVs manually and place them into the descriptor output folder when ready.')
 

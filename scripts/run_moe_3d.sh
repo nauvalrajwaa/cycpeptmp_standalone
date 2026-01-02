@@ -23,7 +23,7 @@ run_moe_mdb() {
 
     local LINUX_IN="$RUN_DIR/sdf/${BASENAME}.sdf"
     # Output langsung diberi nama _final.mdb
-    local LINUX_OUT_MDB="$OUT_DIR/${BASENAME}_final.mdb"
+    local LINUX_OUT_MDB="$OUT_DIR/${BASENAME}_final)3d.mdb"
     
     # Cek input
     if [ ! -f "$LINUX_IN" ]; then

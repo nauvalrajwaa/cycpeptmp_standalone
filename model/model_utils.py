@@ -324,6 +324,8 @@ def predict_valid(device, model, dataloader_valid, criterion,
                   visualization=False,
                   # For classification task
                   classification=False,
+                  # Whether to clip outputs to configured LOWER/UPPER limits
+                  clip_outputs=True,
                   ):
     """
     Predict the validation/test set.
@@ -399,7 +401,7 @@ def predict_valid(device, model, dataloader_valid, criterion,
                     pred__ = output_fusion
                 pred__ = pred__.detach().cpu()
                 # IMPORTANT: scalling the predicted permeability values
-                if not classification:
+                if not classification and clip_outputs:
                     pred__ = torch.min(torch.max(pred__, torch.Tensor([LOWER_LIMIT]).repeat(pred__.shape)), torch.Tensor([UPPER_LIMIT]).repeat(pred__.shape))
 
                 ids += id__.flatten().tolist()

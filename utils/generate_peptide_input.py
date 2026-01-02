@@ -47,12 +47,17 @@ def generate_peptide_input(config, df, df_enu, df_pep_2D, df_pep_3D, folder_path
                 df_pep[desc] = pep_desc_mean[desc]
             else:
                 df_pep[desc] = 0.0
-
-    # Standardize peptide descriptors by Z-score
+    # Impute NaNs using training mean then Standardize peptide descriptors by Z-score
     desc_preprocessing = df_pep[use_descriptors].copy()
     for desc in desc_preprocessing:
+        # fill NaNs with training mean if available, else 0.0
+        fill_val = pep_desc_mean.get(desc, 0.0)
+        desc_preprocessing[desc] = desc_preprocessing[desc].fillna(fill_val)
         mean_val = pep_desc_mean.get(desc, 0.0)
         std_val = pep_desc_std.get(desc, 1.0)
+        # avoid division by zero
+        if std_val == 0 or np.isnan(std_val):
+            std_val = 1.0
         desc_preprocessing[desc] = (desc_preprocessing[desc] - mean_val) / std_val
     desc_preprocessing = desc_preprocessing.to_numpy()
 

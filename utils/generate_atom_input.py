@@ -201,7 +201,7 @@ def generate_atom_input(config, df, df_enu, mols, folder_path, set_name):
     ATOM_PAD_VAL = config['data']['atom_pad_val']
     REPLICA_NUM = config['augmentation']['replica_num']
 
-    os.makedirs(f"{folder_path}/Trans/{REPLICA_NUM}/", exist_ok=False)
+    os.makedirs(f"{folder_path}/Trans/{REPLICA_NUM}/", exist_ok=True)
 
     # Peptide information
     id = df_enu['ID'].to_numpy()

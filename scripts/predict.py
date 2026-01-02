@@ -377,19 +377,28 @@ def main():
         batch_size = args.batch_size if args.batch_size is not None else (len(dataset_new) if len(dataset_new) > 0 else 1)
         dataloader = torch.utils.data.DataLoader(dataset_new, batch_size=batch_size, shuffle=False)
         
+        # Request raw (unclipped) model outputs for inspection, then apply clipping ourselves
         ids, exps, preds = model_utils.predict_valid(
             DEVICE, model, dataloader, None, istrain=False,
             use_auxiliary=config['model']['use_auxiliary'],
             gamma_layer=config['model']['gamma_layer'],
-            gamma_subout=config['model']['gamma_subout']
+            gamma_subout=config['model']['gamma_subout'],
+            clip_outputs=False
         )
-        
-        now_pred = pd.DataFrame(preds, columns=['pred'])
+
+        now_pred = pd.DataFrame({'pred_raw': np.array(preds).flatten()})
         now_pred['ID'] = ids
+        # Apply clipping according to config limits to get the final 'pred' column
+        lower = config['data']['lower_limit']
+        upper = config['data']['upper_limit']
+        now_pred['pred'] = now_pred['pred_raw'].clip(lower, upper)
+
+        # ensure numeric and aggregate across augmented reps
+        now_pred['pred_raw'] = pd.to_numeric(now_pred['pred_raw'], errors='coerce')
         now_pred['pred'] = pd.to_numeric(now_pred['pred'], errors='coerce')
-        
-        now_pred = now_pred.groupby('ID').mean().reset_index()
-        dfs.append(now_pred.set_index('ID'))
+
+        now_grouped = now_pred.groupby('ID').mean().reset_index()
+        dfs.append(now_grouped.set_index('ID'))
     
     if not dfs:
         print("Error: No predictions generated.")
@@ -397,16 +406,18 @@ def main():
 
     pred_mean = sum(dfs) / len(dfs)
     pred_mean = pred_mean.reset_index()
-    
+
     pred_mean['ID'] = pred_mean['ID'].astype(int)
     new_data['join_id'] = new_data['ID'].astype(str).str.extract(r'(\d+)').astype(int)
-    
+
     result = pd.merge(pred_mean, new_data, left_on='ID', right_on='join_id')
-    
-    final_output = result[['ID_org', 'pred', 'SMILES']]
-    
-    print("\n=== FINAL PREDICTIONS ===")
-    print(final_output[['ID_org', 'pred']].to_string(index=False))
+
+    # Include both raw model outputs and clipped predictions in the final CSV
+    # 'pred_raw' = averaged raw model output; 'pred' = averaged clipped output
+    final_output = result[['ID_org', 'pred_raw', 'pred', 'SMILES']]
+
+    print("\n=== FINAL PREDICTIONS (raw vs clipped) ===")
+    print(final_output[['ID_org', 'pred_raw', 'pred']].to_string(index=False))
     
     output_file = f'{dir_predicted}/{set_name}_prediction.csv'
     final_output.to_csv(output_file, index=False)

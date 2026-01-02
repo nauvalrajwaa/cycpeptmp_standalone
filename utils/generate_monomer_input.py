@@ -13,16 +13,100 @@ from utils import utils_function
 def generate_initial_sequence_number(df, df_mono_2D, MONO_PAD_ID, MONO_MAX_LEN):
     """
     Generate monomer ID sequence.
+    Attempts to find a SMILES column in `df_mono_2D` using common variants.
+    If missing, falls back to `data/unique_monomer.csv` (matched by ID) when available.
     """
-    # SMILES_to_ID = dict(zip([utils_function.canonicalize_smiles(smi) for smi in df_mono_2D['SMILES'].to_list()], df_mono_2D['ID']))
-    SMILES_to_index = dict(zip([utils_function.canonicalize_smiles(smi) for smi in df_mono_2D['SMILES'].to_list()], list(range(1, len(df_mono_2D)+1))))
+    # Resolve SMILES column robustly (accept different casings or fall back to unique_monomer)
+    smiles_col = None
+    for col in ['SMILES', 'Smiles', 'smiles', 'SMILE', 'Smi', 'SMI']:
+        if col in df_mono_2D.columns:
+            smiles_col = col
+            break
+
+    smiles_list = None
+    if smiles_col is not None:
+        smiles_list = df_mono_2D[smiles_col].fillna('').astype(str).to_list()
+    else:
+        # Try to load data/unique_monomer.csv and match by ID if possible
+        possible_paths = [
+            os.path.join(os.getcwd(), 'data', 'unique_monomer.csv'),
+            os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'unique_monomer.csv'),
+            os.path.join(os.path.dirname(__file__), '..', 'data', 'unique_monomer.csv')
+        ]
+        unique_df = None
+        for p in possible_paths:
+            try:
+                if os.path.exists(p):
+                    unique_df = pd.read_csv(p)
+                    break
+            except Exception:
+                unique_df = None
+
+        if unique_df is not None and 'SMILES' in unique_df.columns and 'ID' in df_mono_2D.columns and 'ID' in unique_df.columns:
+            # align SMILES to df_mono_2D order using ID
+            id_to_smiles = dict(zip(unique_df['ID'].astype(str).to_list(), unique_df['SMILES'].astype(str).to_list()))
+            smiles_list = [id_to_smiles.get(str(i), '') for i in df_mono_2D['ID'].astype(str).to_list()]
+
+    if smiles_list is None:
+        raise ValueError('monomer dataframe is missing a SMILES column and fallback unique_monomer.csv was not found. Ensure the monomer_2D.csv contains a SMILES column named "SMILES" (or "Smiles").')
+
+    # canonicalize 2D SMILES keys
+    SMILES_to_index = dict(zip([utils_function.canonicalize_smiles(smi) for smi in smiles_list], list(range(1, len(smiles_list)+1))))
     sequence = df.filter(regex='Substructure-\d+', axis=1).values
 
     # # Monomer ID sequence
     # # WARNING: Use sequence ID need full ID list (1 start)
     # sequence_number = [[SMILES_to_ID[j] if j in SMILES_to_ID else MONO_PAD_ID for j in i] for i in sequence]
     # Monomer index sequence
-    sequence_number = [[SMILES_to_index[j] if j in SMILES_to_index else MONO_PAD_ID for j in i] for i in sequence]
+    # Canonicalize sequence entries before lookup
+    sequence_number = []
+    for row in sequence:
+        row_seq = []
+        for j in row:
+            try:
+                sj = '' if pd.isna(j) else str(j)
+                if sj == '':
+                    row_seq.append(MONO_PAD_ID)
+                    continue
+                key = utils_function.canonicalize_smiles(sj)
+                row_seq.append(SMILES_to_index.get(key, MONO_PAD_ID))
+            except Exception:
+                row_seq.append(MONO_PAD_ID)
+        sequence_number.append(row_seq)
+
+    # If no sequence entries matched the 2D-derived SMILES mapping, try fallback to data/unique_monomer.csv
+    mapped_nonpad = sum([sum([1 for v in r if v != MONO_PAD_ID]) for r in sequence_number])
+    if mapped_nonpad == 0:
+        try:
+            # load unique monomer list and map canonical SMILES -> index (1-based)
+            candidates = [
+                os.path.join(os.getcwd(), 'data', 'unique_monomer.csv'),
+                os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'unique_monomer.csv')
+            ]
+            unique_df = None
+            for p in candidates:
+                if os.path.exists(p):
+                    unique_df = pd.read_csv(p)
+                    break
+            if unique_df is not None and 'SMILES' in unique_df.columns:
+                uniq_smiles = unique_df['SMILES'].fillna('').astype(str).tolist()
+                uniq_map = {utils_function.canonicalize_smiles(s): idx+1 for idx, s in enumerate(uniq_smiles)}
+                sequence_number = []
+                for row in sequence:
+                    row_seq = []
+                    for j in row:
+                        try:
+                            sj = '' if pd.isna(j) else str(j)
+                            if sj == '':
+                                row_seq.append(MONO_PAD_ID)
+                                continue
+                            key = utils_function.canonicalize_smiles(sj)
+                            row_seq.append(uniq_map.get(key, MONO_PAD_ID))
+                        except Exception:
+                            row_seq.append(MONO_PAD_ID)
+                    sequence_number.append(row_seq)
+        except Exception:
+            pass
 
     # Align the part with information in the middle
     sequence_number = [[MONO_PAD_ID]*int(np.trunc((MONO_MAX_LEN-now_len)/2)) + \
@@ -96,7 +180,7 @@ def generate_monomer_input(config, df, df_mono_2D, df_mono_3D, folder_path, set_
     MONO_PAD_VAL = config['data']['mono_pad_val']
     REPLICA_NUM = config['augmentation']['replica_num']
 
-    os.makedirs(f"{folder_path}/CNN/{REPLICA_NUM}/", exist_ok=False)
+    os.makedirs(f"{folder_path}/CNN/{REPLICA_NUM}/", exist_ok=True)
 
     y = df['permeability'].to_numpy()
     y = np.clip(y, config['data']['lower_limit'], config['data']['upper_limit']).repeat(REPLICA_NUM)
@@ -110,8 +194,35 @@ def generate_monomer_input(config, df, df_mono_2D, df_mono_3D, folder_path, set_
     # Monomer descriptor types
     use_descriptors = config['descriptor']['desc_2D'] + config['descriptor']['desc_3D']
 
-    # Build combined monomer dataframe (2D repeated to match 3D conformers)
-    df_mono = pd.concat([df_mono_2D.iloc[sum([[_]*REPLICA_NUM for _ in range(len(df_mono_2D))], [])].reset_index(drop=True), df_mono_3D], axis=1)
+    # Build combined monomer dataframe (2D descriptors expanded to match 3D conformers)
+    # Cases handled:
+    # 1) df_mono_2D already has same length as df_mono_3D -> use as-is
+    # 2) df_mono_3D length == df_mono_2D length * REPLICA_NUM -> repeat each 2D row REPLICA_NUM times
+    # 3) If both have a SMILES-like column, attempt to align 2D -> 3D by SMILES matching
+    if len(df_mono_2D) == len(df_mono_3D):
+        df_mono_2D_expanded = df_mono_2D.reset_index(drop=True)
+    elif len(df_mono_3D) == len(df_mono_2D) * REPLICA_NUM:
+        df_mono_2D_expanded = df_mono_2D.loc[df_mono_2D.index.repeat(REPLICA_NUM)].reset_index(drop=True)
+    else:
+        # Try to match by SMILES column names (robust to variants)
+        smiles_candidates = ['SMILES', 'Smiles', 'smiles', 'SMILE', 'Smi', 'SMI', 'mol', 'mol_charged', '$File']
+        col_2d = next((c for c in smiles_candidates if c in df_mono_2D.columns), None)
+        col_3d = next((c for c in smiles_candidates if c in df_mono_3D.columns), None)
+        if col_2d is not None and col_3d is not None:
+            # Reindex 2D descriptors by SMILES and align to 3D SMILES ordering
+            try:
+                df2 = df_mono_2D.set_index(col_2d)
+                # reindex will introduce NaNs for unmatched SMILES; that's acceptable and will be filled later
+                df_mono_2D_expanded = df2.reindex(df_mono_3D[col_3d].astype(str).values).reset_index(drop=True)
+            except Exception:
+                # fallback to naive repetition if matching fails
+                df_mono_2D_expanded = df_mono_2D.loc[df_mono_2D.index.repeat(REPLICA_NUM)].reset_index(drop=True)
+        else:
+            # Last resort: try repeating the 2D table to approximate lengths (may still error downstream)
+            rep = int(max(1, round(len(df_mono_3D) / max(1, len(df_mono_2D)))))
+            df_mono_2D_expanded = df_mono_2D.loc[df_mono_2D.index.repeat(rep)].reset_index(drop=True)
+
+    df_mono = pd.concat([df_mono_2D_expanded.reset_index(drop=True), df_mono_3D.reset_index(drop=True)], axis=1)
 
     # Ensure all descriptors listed in config exist in the dataframe.
     mono_desc_mean = config['descriptor']['mono_desc_mean']
@@ -123,15 +234,22 @@ def generate_monomer_input(config, df, df_mono_2D, df_mono_3D, folder_path, set_
             else:
                 df_mono[desc] = 0.0
 
-    # Standardize monomer descriptors by Z-score
+    # Impute NaNs using training mean then Standardize monomer descriptors by Z-score
     desc_preprocessing = df_mono[use_descriptors].copy()
     for desc in desc_preprocessing:
+        # fill NaNs with training mean if available, else 0.0
+        fill_val = mono_desc_mean.get(desc, 0.0)
+        desc_preprocessing[desc] = desc_preprocessing[desc].fillna(fill_val)
         mean_val = mono_desc_mean.get(desc, 0.0)
         std_val = mono_desc_std.get(desc, 1.0)
+        # avoid division by zero
+        if std_val == 0 or np.isnan(std_val):
+            std_val = 1.0
         desc_preprocessing[desc] = (desc_preprocessing[desc] - mean_val) / std_val
 
     # Assign each conformer of the monomer index from 0 to replica_num-1.
-    desc_preprocessing['replica_index'] = sum([[_ for _ in range(REPLICA_NUM)]*len(df_mono_2D)], [])
+    # Assign replica index (0..REPLICA_NUM-1) to each conformer in df_mono_3D
+    desc_preprocessing['replica_index'] = list(np.arange(len(desc_preprocessing)) % REPLICA_NUM)
     desc_preprocessing.index = df_mono_3D['ID']
 
 
@@ -158,15 +276,26 @@ def generate_monomer_input(config, df, df_mono_2D, df_mono_3D, folder_path, set_
 
     tmp = pd.DataFrame(aug_peptide_ID_now, columns=['aug_peptide_ID'])
     tmp['aug_sequence_number'] = aug_sequence_number_now
-    tmp['replica_index'] = sum([[_ for _ in range(REPLICA_NUM)]*len(df)], [])
+    tmp['replica_index'] = list(np.tile(np.arange(REPLICA_NUM), len(df)))
 
 
     # Generate feature map.
     feature_map = {}
     for i in range(REPLICA_NUM):
         # IMPORTANT: Using 3D descriptors calculated from different conformations
-        feature_map[i] = generate_feature_map(tmp[tmp['replica_index']==i]['aug_sequence_number'].to_list(), \
-                                              desc_preprocessing[desc_preprocessing['replica_index']==i][use_descriptors].values, \
+        # Map global monomer indices in augmented sequences to the positional index within this replica's descriptor array
+        desc_i = desc_preprocessing[desc_preprocessing['replica_index'] == i][use_descriptors]
+        # positional mapping: global ID -> position (1-based for generate_feature_map)
+        ids_i = list(desc_preprocessing[desc_preprocessing['replica_index'] == i].index.astype(int).tolist())
+        pos_map = {int(gid): pos + 1 for pos, gid in enumerate(ids_i)}
+
+        orig_seq_list = tmp[tmp['replica_index'] == i]['aug_sequence_number'].to_list()
+        mapped_seq_list = []
+        for seq in orig_seq_list:
+            mapped_seq_list.append([pos_map.get(int(v), MONO_PAD_ID) if v != MONO_PAD_ID else MONO_PAD_ID for v in seq])
+
+        feature_map[i] = generate_feature_map(mapped_seq_list,
+                                              desc_i.values,
                                               MONO_PAD_ID, MONO_PAD_VAL)
     feature_map_now = []
     # 0 ~ REPLICA_NUM-1

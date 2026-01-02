@@ -16,7 +16,7 @@ scripts/*.csv
 
 runs/
 
-plots/
+plot/
 
 filtered_evobind/
 
